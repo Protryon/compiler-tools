@@ -1,7 +1,7 @@
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
 
-use compiler_tools_derive::token_parse;
 use compiler_tools::TokenParse;
+use compiler_tools_derive::token_parse;
 
 #[token_parse]
 #[derive(Clone, Copy, Debug)]

@@ -1,17 +1,17 @@
 use std::collections::{BTreeMap, HashSet};
 
 use indexmap::IndexMap;
-use proc_macro::{TokenStream};
-use proc_macro2::{Ident, TokenStream as TokenStream2, TokenTree, Delimiter};
-use quote::{quote, quote_spanned, format_ident, TokenStreamExt, ToTokens};
+use proc_macro::TokenStream;
+use proc_macro2::{Delimiter, Ident, TokenStream as TokenStream2, TokenTree};
+use quote::{format_ident, quote, quote_spanned, ToTokens, TokenStreamExt};
 use regex::Regex;
-use syn::{parse_macro_input, DeriveInput, spanned::Spanned, Expr, ExprLit, Lit, Fields, FieldsUnnamed, Type, Lifetime};
+use syn::{parse_macro_input, spanned::Spanned, DeriveInput, Expr, ExprLit, Fields, FieldsUnnamed, Lifetime, Lit, Type};
 
 use crate::{lit_table::LitTable, simple_regex::SimpleRegex};
 
-mod simple_regex;
 mod gen;
 mod lit_table;
+mod simple_regex;
 
 #[proc_macro_attribute]
 pub fn token_parse(_metadata: TokenStream, input: TokenStream) -> TokenStream {
@@ -49,13 +49,11 @@ fn parse_attributes(input: TokenStream2) -> Option<IndexMap<String, String>> {
         return None;
     };
     let mut attributes = IndexMap::<String, String>::new();
-    
+
     loop {
         let name = match tokens.next() {
             None => break,
-            Some(TokenTree::Ident(ident)) => {
-                ident
-            },
+            Some(TokenTree::Ident(ident)) => ident,
             _ => return None,
         };
         if !matches!(tokens.next()?, TokenTree::Punct(p) if p.as_char() == '=') {
@@ -107,7 +105,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
         return quote_spanned! {
             input.generics.span() =>
             compile_error!("TokenParse can only have a single lifetime type parameter");
-        }
+        };
     }
     let has_lifetime_param = input.generics.params.len() == 1;
     let original_lifetime_param = if let Some(syn::GenericParam::Lifetime(lifetime)) = input.generics.params.first() {
@@ -115,15 +113,15 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
     } else {
         None
     };
-    
+
     let items = match &input.data {
-        syn::Data::Enum(items) => {
-            items
-        },
-        _ => return quote_spanned! {
-            input.span() =>
-            compile_error!("TokenParse can only be derived on enums");
-        },
+        syn::Data::Enum(items) => items,
+        _ => {
+            return quote_spanned! {
+                input.span() =>
+                compile_error!("TokenParse can only be derived on enums");
+            }
+        }
     };
 
     let mut tokens_to_parse = vec![];
@@ -146,58 +144,66 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
             }
             let attributes = match parse_attributes(attribute.tokens.clone()) {
                 Some(x) => x,
-                None => return quote_spanned! {
-                    attribute.span() =>
-                    compile_error!("invalid attribute syntax");
-                },
+                None => {
+                    return quote_spanned! {
+                        attribute.span() =>
+                        compile_error!("invalid attribute syntax");
+                    }
+                }
             };
             for (name, value) in attributes {
                 match &*name {
                     "literal" => {
                         parse_data.literals.push(value);
-                    },
+                    }
                     "regex" => {
                         parse_data.simple_regexes.push(value);
-                    },
+                    }
                     "regex_full" => {
                         parse_data.regexes.push(value);
-                    },
+                    }
                     "parse_fn" => {
                         if parse_data.parse_fn.is_some() {
                             return quote_spanned! {
                                 attribute.span() =>
                                 compile_error!("redefined 'parse_fn' attribute");
-                            }
+                            };
                         }
                         parse_data.parse_fn = Some(value);
-                    },
+                    }
                     "eof" => {
                         if parse_data.is_eof {
                             return quote_spanned! {
                                 attribute.span() =>
                                 compile_error!("redefined 'eof' attribute");
-                            }
+                            };
                         }
                         parse_data.is_eof = true;
-                    },
+                    }
                     "illegal" => {
                         if parse_data.is_eof {
                             return quote_spanned! {
                                 attribute.span() =>
                                 compile_error!("redefined 'illegal' attribute");
-                            }
+                            };
                         }
                         parse_data.is_illegal = true;
-                    },
-                    _ => return quote_spanned! {
-                        attribute.span() =>
-                        compile_error!("unknown attribute");
+                    }
+                    _ => {
+                        return quote_spanned! {
+                            attribute.span() =>
+                            compile_error!("unknown attribute");
+                        }
                     }
                 }
             }
         }
         if let Some((_, discriminant)) = &variant.discriminant {
-            if let Expr::Lit(ExprLit { lit: Lit::Str(lit_str), .. }) = discriminant {
+            if let Expr::Lit(ExprLit {
+                lit: Lit::Str(lit_str),
+                ..
+            }) = discriminant
+            {
                 parse_data.literals.push(lit_str.value());
             } else {
                 return quote_spanned! {
@@ -212,7 +218,8 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                 compile_error!("cannot have a 'parse_fn' attribute and a 'literal', 'regex', or 'regex_full' attribute");
             };
         }
-        let has_anything = parse_data.parse_fn.is_some() || !parse_data.literals.is_empty() || !parse_data.simple_regexes.is_empty() || !parse_data.regexes.is_empty();
+        let has_anything =
+            parse_data.parse_fn.is_some() || !parse_data.literals.is_empty() || !parse_data.simple_regexes.is_empty() || !parse_data.regexes.is_empty();
         if (parse_data.is_eof || parse_data.is_illegal) && has_anything {
             return quote_spanned! {
                 input.span() =>
@@ -231,8 +238,11 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                     variant.fields.span() =>
                     compile_error!("cannot have enum struct in TokenParse variant");
                 };
-            },
-            Fields::Unnamed(FieldsUnnamed { unnamed, .. }) => {
+            }
+            Fields::Unnamed(FieldsUnnamed {
+                unnamed,
+                ..
+            }) => {
                 if unnamed.len() != 1 {
                     return quote_spanned! {
                         unnamed.span() =>
@@ -268,17 +278,17 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                             };
                         }
                         parse_data.has_target = true;
-                    },
+                    }
                     _ => {
                         parse_data.has_target = true;
                         parse_data.target_needs_parse = true;
                     }
                 }
-            },
+            }
             // no target
             Fields::Unit => (),
         }
-        
+
         tokens_to_parse.push(parse_data)
     }
 
@@ -287,10 +297,12 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
         for simple_regex in &item.simple_regexes {
             let parsed = match SimpleRegex::parse(simple_regex) {
                 Some(x) => x,
-                None => return quote_spanned! {
-                    item.ident.span() =>
-                    compile_error!("invalid simple regex");
-                },
+                None => {
+                    return quote_spanned! {
+                        item.ident.span() =>
+                        compile_error!("invalid simple regex");
+                    }
+                }
             };
             simple_regexes.insert((item.ident.clone(), simple_regex.clone()), parsed);
         }
@@ -302,10 +314,12 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
             let modified_regex = format!("^{}", regex);
             let parsed = match Regex::new(&*modified_regex) {
                 Ok(x) => x,
-                Err(_) => return quote_spanned! {
-                    item.ident.span() =>
-                    compile_error!("invalid simple regex");
-                },
+                Err(_) => {
+                    return quote_spanned! {
+                        item.ident.span() =>
+                        compile_error!("invalid simple regex");
+                    }
+                }
             };
             regexes.insert((item.ident.clone(), regex.clone()), parsed);
         }
@@ -315,7 +329,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
     let mut simple_regex_ident_conflicts: BTreeMap<(Ident, String), Vec<(Ident, String)>> = BTreeMap::new();
     let mut regex_ident_conflicts: BTreeMap<(Ident, String), Vec<(Ident, String)>> = BTreeMap::new();
     let mut known_literals = HashSet::new();
-    
+
     let mut lit_table = LitTable::default();
     for item in tokens_to_parse.iter() {
         for literal in &item.literals {
@@ -323,12 +337,13 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                 return quote_spanned! {
                     item.ident.span() =>
                     compile_error!("conflicting literals");
-                }
+                };
             }
             let mut any_matched = false;
             for ((ident, raw_regex), regex) in &simple_regexes {
                 if regex.matches(&**literal) {
-                    simple_regex_ident_conflicts.entry((ident.clone(), raw_regex.clone()))
+                    simple_regex_ident_conflicts
+                        .entry((ident.clone(), raw_regex.clone()))
                         .or_default()
                         .push((item.ident.clone(), literal.clone()));
                     any_matched = true;
@@ -339,7 +354,8 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
             }
             for ((ident, raw_regex), regex) in &regexes {
                 if regex.is_match(&**literal) {
-                    regex_ident_conflicts.entry((ident.clone(), raw_regex.clone()))
+                    regex_ident_conflicts
+                        .entry((ident.clone(), raw_regex.clone()))
                         .or_default()
                         .push((item.ident.clone(), literal.clone()));
                     any_matched = true;
@@ -355,19 +371,20 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
     let lit_table_name = format_ident!("parse_lits");
     let lit_table = lit_table.emit(&lit_table_name, &input.ident);
 
-    let (simple_regex_fns, simple_regex_calls) = match gen::simple_regex::gen_simple_regex(&tokens_to_parse[..], &simple_regexes, &simple_regex_ident_conflicts, &input.ident) {
-        Ok(x) => x,
-        Err(e) => return e,
-    };
+    let (simple_regex_fns, simple_regex_calls) =
+        match gen::simple_regex::gen_simple_regex(&tokens_to_parse[..], &simple_regexes, &simple_regex_ident_conflicts, &input.ident) {
+            Ok(x) => x,
+            Err(e) => return e,
+        };
     let (regex_fns, regex_calls) = match gen::full_regex::gen_full_regex(&tokens_to_parse[..], &regex_ident_conflicts, &input.ident) {
         Ok(x) => x,
         Err(e) => return e,
     };
-    
+
     let lifetime_param = if has_lifetime_param {
         quote! { <'a> }
     } else {
-        quote! { }
+        quote! {}
     };
     let ident_raw = input.ident.to_string();
     let tokenizer_ident = if ident_raw.contains("Token") {
@@ -383,13 +400,18 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
     let reinput = {
         let attrs = flatten(&input.attrs);
         let vis = &input.vis;
-        let ident= &input.ident;
+        let ident = &input.ident;
         let generics = &input.generics;
         let mut variants = vec![];
         for variant in &items.variants {
-            let attrs = flatten(variant.attrs.iter().filter(|a| a.path.segments.len() != 1 || a.path.segments.first().unwrap().ident != "token"));
+            let attrs = flatten(
+                variant
+                    .attrs
+                    .iter()
+                    .filter(|a| a.path.segments.len() != 1 || a.path.segments.first().unwrap().ident != "token"),
+            );
             let ident = &variant.ident;
-            let fields= &variant.fields;
+            let fields = &variant.fields;
             // discriminant ignored
             variants.push(quote! {
                 #attrs

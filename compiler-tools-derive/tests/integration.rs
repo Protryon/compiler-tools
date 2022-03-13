@@ -1,5 +1,5 @@
-use compiler_tools_derive::token_parse;
 use compiler_tools::TokenParse;
+use compiler_tools_derive::token_parse;
 
 #[token_parse]
 #[derive(Clone, Copy, Debug)]
@@ -21,7 +21,8 @@ pub enum Token<'a> {
 
 #[test]
 fn test_token() {
-    let mut tokenizer = Tokenizer::new(r#"async%+await+
+    let mut tokenizer = Tokenizer::new(
+        r#"async%+await+
     +%awaitye
     await
     test_ident+
@@ -31,7 +32,8 @@ fn test_token() {
     *
     block */
     new_ident
-    "#);
+    "#,
+    );
     while let Some(next) = tokenizer.next() {
         println!("{}", next);
     }

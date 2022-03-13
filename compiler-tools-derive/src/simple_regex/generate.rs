@@ -23,13 +23,13 @@ impl SimpleRegex {
                                         matching.push(quote! { | })
                                     }
                                     matching.push(quote! { #c });
-                                },
+                                }
                                 GroupEntry::Range(start, end) => {
                                     if !matching.is_empty() {
                                         matching.push(quote! { | })
                                     }
                                     matching.push(quote! { #start ..= #end });
-                                },
+                                }
                             }
                         }
                         let matching_empty = matching.is_empty();
@@ -39,18 +39,18 @@ impl SimpleRegex {
                             if matching_empty {
                                 quote! {
                                     _ => ::compiler_tools::MatchResult::Matched(#target),
-                                }    
+                                }
                             } else {
                                 quote! {
                                     c if !matches!(c, #matching) => ::compiler_tools::MatchResult::Matched(#target),
-                                }    
+                                }
                             }
                         } else {
                             quote! {
                                 #matching => ::compiler_tools::MatchResult::Matched(#target),
                             }
                         }
-                    },
+                    }
                 };
                 transition_matches.push(match_expr);
             }

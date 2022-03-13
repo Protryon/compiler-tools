@@ -1,11 +1,16 @@
 use std::collections::BTreeMap;
 
-use proc_macro2::{TokenStream, Ident};
-use quote::{quote, format_ident};
+use proc_macro2::{Ident, TokenStream};
+use quote::{format_ident, quote};
 
-use crate::{simple_regex::SimpleRegex, TokenParseData, construct_variant, flatten};
+use crate::{construct_variant, flatten, simple_regex::SimpleRegex, TokenParseData};
 
-pub(crate) fn gen_simple_regex(tokens_to_parse: &[TokenParseData], parsed: &BTreeMap<(Ident, String), SimpleRegex>, conflicts: &BTreeMap<(Ident, String), Vec<(Ident, String)>>, enum_ident: &Ident) -> Result<(TokenStream, TokenStream), TokenStream> {
+pub(crate) fn gen_simple_regex(
+    tokens_to_parse: &[TokenParseData],
+    parsed: &BTreeMap<(Ident, String), SimpleRegex>,
+    conflicts: &BTreeMap<(Ident, String), Vec<(Ident, String)>>,
+    enum_ident: &Ident,
+) -> Result<(TokenStream, TokenStream), TokenStream> {
     let mut simple_regex_fns = vec![];
     let mut simple_regex_calls = vec![];
     for item in tokens_to_parse.iter() {

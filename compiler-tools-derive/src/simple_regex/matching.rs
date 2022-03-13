@@ -4,23 +4,25 @@ impl SimpleRegex {
     pub fn could_capture_newline(&self) -> bool {
         for atom in &self.ast.atoms {
             match &atom.atom {
-                Atom::Literal(lit) => if lit.contains('\n') {
-                    return true;
-                },
+                Atom::Literal(lit) => {
+                    if lit.contains('\n') {
+                        return true;
+                    }
+                }
                 Atom::Group(inverted, entries) => {
                     if *inverted {
                         for entry in entries {
                             match entry {
                                 GroupEntry::Char(c) => {
                                     if *c == '\n' {
-                                        return false; 
+                                        return false;
                                     }
-                                },
+                                }
                                 GroupEntry::Range(start, end) => {
                                     if *start <= '\n' && *end >= '\n' {
                                         return false;
                                     }
-                                },
+                                }
                             }
                         }
                         return true;
@@ -35,7 +37,7 @@ impl SimpleRegex {
                             }
                         }
                     }
-                },
+                }
             }
         }
         return false;

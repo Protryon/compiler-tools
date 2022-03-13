@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
 
-use crate::{TokenParseData, flatten};
+use crate::{flatten, TokenParseData};
 
 #[derive(Default)]
 pub(super) struct LitTable {
@@ -49,18 +49,18 @@ impl LitTableToken {
                     from = &from[#len..];
                     (#enum_ident::#variant, #newlines)
                 }
-            }    
+            }
         }
     }
 }
 
 impl LitTable {
-    pub(super) fn push(&mut self, item: &TokenParseData, literal: &str, remaining: &mut impl Iterator<Item=char>) {
+    pub(super) fn push(&mut self, item: &TokenParseData, literal: &str, remaining: &mut impl Iterator<Item = char>) {
         match remaining.next() {
             Some(c) => {
                 let entry = self.table.entry(c).or_default();
                 entry.push(item, literal, remaining);
-            },
+            }
             None => {
                 self.token = Some(LitTableToken {
                     ident: item.ident.clone(),
@@ -68,7 +68,7 @@ impl LitTable {
                     target_needs_parse: item.target_needs_parse,
                     literal: literal.to_string(),
                 })
-            },
+            }
         }
     }
 
@@ -104,12 +104,12 @@ impl LitTable {
                 });
             }
             let entries = flatten(entries);
-    
+
             quote! {
                 match iter.next() {
                     #entries
                 }
-            }    
+            }
         }
     }
 

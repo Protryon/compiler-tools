@@ -1,15 +1,15 @@
-use proc_macro2::{TokenStream, Ident};
+use proc_macro2::{Ident, TokenStream};
 use quote::quote;
 
 use crate::flatten;
 
 use self::{dfa::Dfa, nfa::Nfa};
 
-mod parse;
-mod matching;
-mod generate;
-mod nfa;
 mod dfa;
+mod generate;
+mod matching;
+mod nfa;
+mod parse;
 
 #[derive(Debug)]
 pub enum Repeat {

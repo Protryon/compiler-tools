@@ -1,8 +1,6 @@
-use std::collections::{BTreeMap, HashSet, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use super::nfa::{TransitionEvent, Nfa};
-
-
+use super::nfa::{Nfa, TransitionEvent};
 
 #[derive(Debug)]
 pub struct Dfa {
@@ -41,12 +39,15 @@ impl Dfa {
                     }
                 }
             }
-            let mut original_shadowed_closures: HashMap<u32, Vec<(TransitionEvent, u32)>> = shadowed_closures.iter().map(|(shadowed, shadows)| {
-                (
-                    epsilon_closure.get(shadowed).unwrap().clone().1,
-                    shadows.into_iter().map(|shadow| epsilon_closure.get(shadow).unwrap().clone()).collect(),    
-                )
-            }).collect();
+            let mut original_shadowed_closures: HashMap<u32, Vec<(TransitionEvent, u32)>> = shadowed_closures
+                .iter()
+                .map(|(shadowed, shadows)| {
+                    (
+                        epsilon_closure.get(shadowed).unwrap().clone().1,
+                        shadows.into_iter().map(|shadow| epsilon_closure.get(shadow).unwrap().clone()).collect(),
+                    )
+                })
+                .collect();
 
             let total = epsilon_closure.len();
             let mut emitted_closures = vec![];

@@ -1,8 +1,7 @@
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
 
-use crate::{TokenParseData, flatten};
-
+use crate::{flatten, TokenParseData};
 
 pub(crate) fn gen_display(tokens_to_parse: &[TokenParseData], enum_ident: &Ident) -> TokenStream {
     let mut display_fields = vec![];

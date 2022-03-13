@@ -1,4 +1,3 @@
-
 /// Used by simple_regex generated code
 pub enum MatchResult {
     Matched(u32),

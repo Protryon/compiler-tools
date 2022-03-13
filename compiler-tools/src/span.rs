@@ -1,4 +1,4 @@
-use std::fmt::{self, Display, Debug};
+use std::fmt::{self, Debug, Display};
 
 #[derive(Clone, Debug, Copy, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -22,17 +22,9 @@ impl std::hash::Hash for Span {
 impl fmt::Display for Span {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.line_start == self.line_stop {
-            write!(
-                f,
-                "{}:{}-{}",
-                self.line_start, self.col_start, self.col_stop
-            )
+            write!(f, "{}:{}-{}", self.line_start, self.col_start, self.col_stop)
         } else {
-            write!(
-                f,
-                "{}:{}-{}:{}",
-                self.line_start, self.col_start, self.line_stop, self.col_stop
-            )
+            write!(f, "{}:{}-{}:{}", self.line_start, self.col_start, self.line_stop, self.col_stop)
         }
     }
 }
