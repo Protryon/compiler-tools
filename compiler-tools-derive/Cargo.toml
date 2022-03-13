@@ -19,6 +19,6 @@ indexmap = "1.8"
 regex = { version = "1.5" }
 
 [dev-dependencies]
-compiler-tools = { path = "../compiler-tools" }
+compiler-tools = { version = "0.1", path = "../compiler-tools" }
 
 [features]
