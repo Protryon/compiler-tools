@@ -1,0 +1,13 @@
+[package]
+name = "compiler-tools"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", optional = true, features = ["derive"] }
+regex = { version = "1.5", optional = true }
+once_cell = { version = "1.10", optional = true }
+
+[features]
+default = ["serde", "use_regex"]
+use_regex = ["regex", "once_cell"]
