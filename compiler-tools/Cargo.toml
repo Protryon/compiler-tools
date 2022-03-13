@@ -2,6 +2,11 @@
 name = "compiler-tools"
 version = "0.1.0"
 edition = "2021"
+authors = ["Protryon <max.bruce12@gmail.com>"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Protryon/compiler-tools"
+description = "A proc-macro for deriving powerful and fast tokenizers with compile-time regex"
+keywords = [ "compiler", "parser", "generator" ]
 
 [dependencies]
 serde = { version = "1.0", optional = true, features = ["derive"] }
