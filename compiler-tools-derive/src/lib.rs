@@ -28,7 +28,6 @@ fn flatten<S: ToTokens, T: IntoIterator<Item = S>>(iter: T) -> TokenStream2 {
 struct TokenParseData {
     has_target: bool,
     target_needs_parse: bool,
-    is_eof: bool,
     is_illegal: bool,
     literals: Vec<String>,
     simple_regexes: Vec<String>,
@@ -37,7 +36,7 @@ struct TokenParseData {
     ident: Ident,
 }
 
-fn parse_attributes(input: TokenStream2) -> Option<IndexMap<String, String>> {
+fn parse_attributes(input: TokenStream2) -> Option<IndexMap<String, Option<String>>> {
     let mut tokens = input.into_iter().peekable();
     let mut tokens = if let Some(TokenTree::Group(group)) = tokens.peek() {
         if group.delimiter() == Delimiter::Parenthesis {
@@ -48,7 +47,7 @@ fn parse_attributes(input: TokenStream2) -> Option<IndexMap<String, String>> {
     } else {
         return None;
     };
-    let mut attributes = IndexMap::<String, String>::new();
+    let mut attributes = IndexMap::<String, Option<String>>::new();
 
     loop {
         let name = match tokens.next() {
@@ -56,24 +55,27 @@ fn parse_attributes(input: TokenStream2) -> Option<IndexMap<String, String>> {
             Some(TokenTree::Ident(ident)) => ident,
             _ => return None,
         };
-        if !matches!(tokens.next()?, TokenTree::Punct(p) if p.as_char() == '=') {
-            return None;
-        }
-        let value = if let TokenTree::Literal(literal) = tokens.next()? {
-            let lit = Lit::new(literal);
-            match lit {
-                Lit::Str(s) => s.value(),
-                Lit::Char(c) => c.value().to_string(),
-                _ => return None,
-            }
-        } else {
-            return None;
-        };
-        attributes.insert(name.to_string(), value);
         match tokens.next() {
-            None => break,
-            Some(TokenTree::Punct(p)) if p.as_char() == ')' => break,
-            Some(TokenTree::Punct(p)) if p.as_char() == ',' => continue,
+            None => {
+                attributes.insert(name.to_string(), None);
+                break;
+            },
+            Some(TokenTree::Punct(p)) if p.as_char() == ',' => {
+                attributes.insert(name.to_string(), None);
+            },
+            Some(TokenTree::Punct(p)) if p.as_char() == '=' => {
+                let value = if let TokenTree::Literal(literal) = tokens.next()? {
+                    let lit = Lit::new(literal);
+                    Some(match lit {
+                        Lit::Str(s) => s.value(),
+                        Lit::Char(c) => c.value().to_string(),
+                        _ => return None,
+                    })
+                } else {
+                    return None;
+                };
+                attributes.insert(name.to_string(), value);
+            },
             _ => return None,
         }
     }
@@ -125,11 +127,11 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
     };
 
     let mut tokens_to_parse = vec![];
+    let mut has_illegal = false;
     for variant in &items.variants {
         let mut parse_data = TokenParseData {
             has_target: false,
             target_needs_parse: false,
-            is_eof: false,
             is_illegal: false,
             literals: vec![],
             simple_regexes: vec![],
@@ -152,15 +154,22 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                 }
             };
             for (name, value) in attributes {
+                if name != "illegal" && value.is_none() {
+                    return quote_spanned! {
+                        attribute.span() =>
+                        compile_error!("missing attribute value");
+                    }
+                }
+
                 match &*name {
                     "literal" => {
-                        parse_data.literals.push(value);
+                        parse_data.literals.push(value.unwrap());
                     }
                     "regex" => {
-                        parse_data.simple_regexes.push(value);
+                        parse_data.simple_regexes.push(value.unwrap());
                     }
                     "regex_full" => {
-                        parse_data.regexes.push(value);
+                        parse_data.regexes.push(value.unwrap());
                     }
                     "parse_fn" => {
                         if parse_data.parse_fn.is_some() {
@@ -169,25 +178,23 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                                 compile_error!("redefined 'parse_fn' attribute");
                             };
                         }
-                        parse_data.parse_fn = Some(value);
-                    }
-                    "eof" => {
-                        if parse_data.is_eof {
-                            return quote_spanned! {
-                                attribute.span() =>
-                                compile_error!("redefined 'eof' attribute");
-                            };
-                        }
-                        parse_data.is_eof = true;
+                        parse_data.parse_fn = Some(value.unwrap());
                     }
                     "illegal" => {
-                        if parse_data.is_eof {
+                        if value.is_some() {
+                            return quote_spanned! {
+                                attribute.span() =>
+                                compile_error!("unexpected attribute value");
+                            }
+                        }
+                        if parse_data.is_illegal || has_illegal {
                             return quote_spanned! {
                                 attribute.span() =>
                                 compile_error!("redefined 'illegal' attribute");
                             };
                         }
                         parse_data.is_illegal = true;
+                        has_illegal = true;
                     }
                     _ => {
                         return quote_spanned! {
@@ -220,15 +227,15 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
         }
         let has_anything =
             parse_data.parse_fn.is_some() || !parse_data.literals.is_empty() || !parse_data.simple_regexes.is_empty() || !parse_data.regexes.is_empty();
-        if (parse_data.is_eof || parse_data.is_illegal) && has_anything {
+        if parse_data.is_illegal && has_anything {
             return quote_spanned! {
                 input.span() =>
-                compile_error!("cannot have an 'eof' or 'illegal' attribute and a 'literal', 'regex', 'regex_full', or 'parse_fn' attribute");
+                compile_error!("cannot have an 'illegal' attribute and a 'literal', 'regex', 'regex_full', or 'parse_fn' attribute");
             };
-        } else if !has_anything {
+        } else if !parse_data.is_illegal && !has_anything {
             return quote_spanned! {
                 input.span() =>
-                compile_error!("must have an enum discriminant or 'eof', 'illegal', 'literal', 'regex', 'regex_full', or 'parse_fn' attribute");
+                compile_error!("must have an enum discriminant or 'illegal', 'literal', 'regex', 'regex_full', or 'parse_fn' attribute");
             };
         }
 
@@ -286,7 +293,14 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                 }
             }
             // no target
-            Fields::Unit => (),
+            Fields::Unit => {
+                if parse_data.is_illegal {
+                    return quote_spanned! {
+                        variant.span() =>
+                        compile_error!("'illegal' attributed tokens must have a single field (usually 'char' or '&str')");
+                    };
+                }
+            },
         }
 
         tokens_to_parse.push(parse_data)
@@ -397,6 +411,43 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
 
     let display_fields = gen::display::gen_display(&tokens_to_parse[..], &input.ident);
 
+    let illegal_emission = if let Some(illegal) = tokens_to_parse.iter().find(|x| x.is_illegal) {
+        let constructor = construct_variant(illegal, &input.ident);
+        quote! {
+            if let Some(value) = self.inner.chars().next() {
+                let span = ::compiler_tools::Span {
+                    line_start: self.line,
+                    col_start: self.col,
+                    line_stop: if value == '\n' {
+                        self.line
+                    } else {
+                        self.line += 1;
+                        self.line
+                    },
+                    col_stop: if value != '\n' {
+                        self.col += value.len_utf8() as u64;
+                        self.col
+                    } else {
+                        self.col = 0;
+                        self.col
+                    },
+                };
+                let passed = &self.inner[..value.len_utf8()];
+                self.inner = &self.inner[value.len_utf8()..];
+                return Some(::compiler_tools::Spanned {
+                    token: #constructor,
+                    span,
+                })
+            } else {
+                None
+            }
+        }
+    } else {
+        quote! {
+            None
+        }
+    };
+
     let reinput = {
         let attrs = flatten(&input.attrs);
         let vis = &input.vis;
@@ -457,7 +508,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
         impl<'a> ::compiler_tools::TokenParse<'a> for #tokenizer_ident<'a> {
             type Token = #token_ident #lifetime_param;
 
-            #[allow(non_snake_case, unreachable_pattern)]
+            #[allow(non_snake_case, unreachable_pattern, unreachable_code)]
             fn next(&mut self) -> Option<::compiler_tools::Spanned<Self::Token>> {
                 #lit_table
                 #simple_regex_fns
@@ -495,8 +546,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                 }
                 #simple_regex_calls
                 #regex_calls
-                //TODO: illegal & EOF
-                None
+                #illegal_emission
             }
         }
     }

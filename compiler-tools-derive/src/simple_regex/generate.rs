@@ -13,7 +13,7 @@ impl SimpleRegex {
                 let match_expr = match transition {
                     nfa::TransitionEvent::Epsilon => unreachable!(),
                     nfa::TransitionEvent::End => quote! { _ => ::compiler_tools::MatchResult::MatchedEmpty(#target), },
-                    nfa::TransitionEvent::Char(c) => quote! { #c => ::compiler_tools::MatchResult::Matched(#target), },
+                    nfa::TransitionEvent::Char(c) => quote! { Some(#c) => ::compiler_tools::MatchResult::Matched(#target), },
                     nfa::TransitionEvent::Chars(inverted, group) => {
                         let mut matching = vec![];
                         for entry in group {
@@ -22,13 +22,13 @@ impl SimpleRegex {
                                     if !matching.is_empty() {
                                         matching.push(quote! { | })
                                     }
-                                    matching.push(quote! { #c });
+                                    matching.push(quote! { Some(#c) });
                                 }
                                 GroupEntry::Range(start, end) => {
                                     if !matching.is_empty() {
                                         matching.push(quote! { | })
                                     }
-                                    matching.push(quote! { #start ..= #end });
+                                    matching.push(quote! { Some(#start ..= #end) });
                                 }
                             }
                         }
@@ -58,7 +58,7 @@ impl SimpleRegex {
 
             state_fns.push(quote! {
                 #[inline]
-                fn #state_fn(target: char) -> ::compiler_tools::MatchResult {
+                fn #state_fn(target: Option<char>) -> ::compiler_tools::MatchResult {
                     match target {
                         #transition_matches
                         _ => ::compiler_tools::MatchResult::NoMatch,
@@ -92,7 +92,9 @@ impl SimpleRegex {
                 #state_fns
                 let mut counter = 0usize;
                 let mut state = 0u32;
-                for c in from.chars() {
+                let mut chars = from.chars();
+                loop {
+                    let c = chars.next();
                     let next_state = match state {
                         #state_matches
                         _ => ::compiler_tools::MatchResult::NoMatch,
@@ -100,7 +102,7 @@ impl SimpleRegex {
                     match next_state {
                         ::compiler_tools::MatchResult::Matched(next_state) => {
                             state = next_state;
-                            counter += c.len_utf8();
+                            counter += c.unwrap().len_utf8();
                             if next_state == #final_state {
                                 return Some((&from[..counter], &from[counter..]));
                             }
