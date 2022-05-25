@@ -4,7 +4,7 @@ use compiler_tools::TokenParse;
 use compiler_tools_derive::token_parse;
 
 #[token_parse]
-#[derive(Clone, Copy, Debug)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum TokenSimple<'a> {
     Async = "async",
     Plus = "+",
@@ -15,7 +15,7 @@ pub enum TokenSimple<'a> {
 }
 
 #[token_parse]
-#[derive(Clone, Copy, Debug)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum TokenFull<'a> {
     Async = "async",
     Plus = "+",

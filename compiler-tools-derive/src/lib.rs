@@ -7,7 +7,7 @@ use quote::{format_ident, quote, quote_spanned, ToTokens, TokenStreamExt};
 use regex::Regex;
 use syn::{parse_macro_input, spanned::Spanned, DeriveInput, Expr, ExprLit, Fields, FieldsUnnamed, Lifetime, Lit, Type};
 
-use crate::{lit_table::LitTable, simple_regex::SimpleRegex};
+use crate::{gen::class_match::gen_class_match, lit_table::LitTable, simple_regex::SimpleRegex};
 
 mod gen;
 mod lit_table;
@@ -59,10 +59,10 @@ fn parse_attributes(input: TokenStream2) -> Option<IndexMap<String, Option<Strin
             None => {
                 attributes.insert(name.to_string(), None);
                 break;
-            },
+            }
             Some(TokenTree::Punct(p)) if p.as_char() == ',' => {
                 attributes.insert(name.to_string(), None);
-            },
+            }
             Some(TokenTree::Punct(p)) if p.as_char() == '=' => {
                 let value = if let TokenTree::Literal(literal) = tokens.next()? {
                     let lit = Lit::new(literal);
@@ -75,7 +75,7 @@ fn parse_attributes(input: TokenStream2) -> Option<IndexMap<String, Option<Strin
                     return None;
                 };
                 attributes.insert(name.to_string(), value);
-            },
+            }
             _ => return None,
         }
     }
@@ -158,7 +158,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                     return quote_spanned! {
                         attribute.span() =>
                         compile_error!("missing attribute value");
-                    }
+                    };
                 }
 
                 match &*name {
@@ -185,7 +185,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                             return quote_spanned! {
                                 attribute.span() =>
                                 compile_error!("unexpected attribute value");
-                            }
+                            };
                         }
                         if parse_data.is_illegal || has_illegal {
                             return quote_spanned! {
@@ -300,7 +300,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                         compile_error!("'illegal' attributed tokens must have a single field (usually 'char' or '&str')");
                     };
                 }
-            },
+            }
         }
 
         tokens_to_parse.push(parse_data)
@@ -478,6 +478,8 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
         }
     };
 
+    let class_matches = gen_class_match(&tokens_to_parse[..], &input.ident);
+
     quote! {
         #reinput
 
@@ -485,6 +487,14 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 match self {
                     #display_fields
+                }
+            }
+        }
+
+        impl #lifetime_param ::compiler_tools::TokenExt for #token_ident #lifetime_param {
+            fn matches_class(&self, other: &Self) -> bool {
+                match (self, other) {
+                    #class_matches
                 }
             }
         }

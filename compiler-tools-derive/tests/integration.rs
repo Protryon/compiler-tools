@@ -2,7 +2,7 @@ use compiler_tools::TokenParse;
 use compiler_tools_derive::token_parse;
 
 #[token_parse]
-#[derive(Clone, Copy, Debug)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum Token<'a> {
     Async = "async",
     Await = "await",

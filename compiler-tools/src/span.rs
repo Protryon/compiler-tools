@@ -1,4 +1,7 @@
-use std::fmt::{self, Debug, Display};
+use std::{
+    fmt::{self, Debug, Display},
+    ops::{Deref, DerefMut},
+};
 
 #[derive(Clone, Debug, Copy, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -63,6 +66,20 @@ impl std::ops::Add for Span {
 pub struct Spanned<T: Clone + Copy> {
     pub token: T,
     pub span: Span,
+}
+
+impl<T: Clone + Copy> Deref for Spanned<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.token
+    }
+}
+
+impl<T: Clone + Copy> DerefMut for Spanned<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.token
+    }
 }
 
 impl<T: Clone + Copy + Display> Display for Spanned<T> {
