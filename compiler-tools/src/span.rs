@@ -61,6 +61,12 @@ impl std::ops::Add for Span {
     }
 }
 
+impl std::ops::AddAssign for Span {
+    fn add_assign(&mut self, rhs: Self) {
+        *self = *self + rhs;
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Copy)]
 pub struct Spanned<T: Clone + Copy> {
