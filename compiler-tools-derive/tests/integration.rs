@@ -10,6 +10,8 @@ pub enum Token<'a> {
     Percent = "%",
     Plus = "+",
     Minus = "-",
+    #[token(parse_fn = "compiler_tools::util::parse_str::<'\\''>")]
+    String(&'a str),
     #[token(regex = "[0-9]+")]
     Int(i32),
     #[token(regex = "[a-z][a-zA-Z0-9_]*")]
@@ -35,6 +37,10 @@ fn test_token() {
     //test comment
     1234
     -1234
+    'test str'
+    'test '' str'
+    'test \d str'
+    'test \' str'
     /* test
     *
     block */

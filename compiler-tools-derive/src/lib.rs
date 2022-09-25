@@ -5,7 +5,7 @@ use proc_macro::TokenStream;
 use proc_macro2::{Delimiter, Ident, TokenStream as TokenStream2, TokenTree};
 use quote::{format_ident, quote, quote_spanned, ToTokens, TokenStreamExt};
 use regex::Regex;
-use syn::{parse_macro_input, spanned::Spanned, DeriveInput, Expr, ExprLit, Fields, FieldsUnnamed, Lifetime, Lit, Type};
+use syn::{parse_macro_input, spanned::Spanned, DeriveInput, Expr, ExprLit, ExprPath, Fields, FieldsUnnamed, Lifetime, Lit, Type};
 
 use crate::{gen::class_match::gen_class_match, lit_table::LitTable, simple_regex::SimpleRegex};
 
@@ -480,6 +480,51 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
 
     let class_matches = gen_class_match(&tokens_to_parse[..], &input.ident);
 
+    let mut custom_parse_fns: Vec<TokenStream2> = vec![];
+    for token in &tokens_to_parse {
+        if let Some(parse_fn) = &token.parse_fn {
+            let path_expr: ExprPath = match syn::parse_str(&parse_fn) {
+                Ok(x) => x,
+                Err(_e) => {
+                    custom_parse_fns.push(quote! { compile_error!("can't parse path for parse_fn"); });
+                    continue;
+                }
+            };
+            let constructed = construct_variant(token, &input.ident);
+            custom_parse_fns.push(quote! {
+                {
+                    if let Some((passed, remaining)) = #path_expr(self.inner) {
+                        let span = ::compiler_tools::Span {
+                            line_start: self.line,
+                            col_start: self.col,
+                            line_stop: {
+                                self.line += passed.chars().filter(|x| *x == '\n').count() as u64;
+                                self.line
+                            },
+                            //todo: handle utf8 better with newline seeking here
+                            col_stop: if let Some(newline_offset) = passed.as_bytes().iter().rev().position(|x| *x == b'\n') {
+                                let newline_offset = passed.len() - newline_offset;
+                                self.col = (newline_offset as u64).saturating_sub(1);
+                                self.col
+                            } else {
+                                self.col += passed.len() as u64;
+                                self.col
+                            },
+                        };
+                        self.inner = remaining;
+                        match passed {
+                            passed => return Some(::compiler_tools::Spanned {
+                                token: #constructed,
+                                span,
+                            }),
+                        }
+                    }
+                }
+            });
+        }
+    }
+    let custom_parse_fns = flatten(custom_parse_fns);
+
     quote! {
         #reinput
 
@@ -556,6 +601,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                 }
                 #simple_regex_calls
                 #regex_calls
+                #custom_parse_fns
                 #illegal_emission
             }
         }
