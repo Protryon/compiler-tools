@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 
-use crate::{construct_variant, flatten, simple_regex::SimpleRegex, TokenParseData};
+use crate::{construct_variant, flatten, SimpleRegexData, TokenParseData};
 
 pub(crate) fn gen_simple_regex(
     tokens_to_parse: &[TokenParseData],
-    parsed: &BTreeMap<(Ident, String), SimpleRegex>,
+    parsed: &BTreeMap<(Ident, String), SimpleRegexData>,
     conflicts: &BTreeMap<(Ident, String), Vec<(Ident, String)>>,
     enum_ident: &Ident,
 ) -> Result<(TokenStream, TokenStream), TokenStream> {
@@ -16,7 +16,7 @@ pub(crate) fn gen_simple_regex(
     for item in tokens_to_parse.iter() {
         for simple_regex in &item.simple_regexes {
             let key = (item.ident.clone(), simple_regex.clone());
-            let parsed = parsed.get(&key).unwrap();
+            let parsed = &parsed.get(&key).unwrap().regex;
             let fn_ident = format_ident!("parse_sr_{}", item.ident);
             let parse_fn = parsed.generate_parser(fn_ident.clone());
             simple_regex_fns.push(parse_fn);

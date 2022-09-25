@@ -14,6 +14,8 @@ pub enum Token<'a> {
     String(&'a str),
     #[token(regex = "[0-9]+")]
     Int(i32),
+    #[token(regex = "awa[a-z]+")]
+    AwaIdent(&'a str),
     #[token(regex = "[a-z][a-zA-Z0-9_]*")]
     Ident(&'a str),
     #[token(regex = "//[^\n]*")]
@@ -32,6 +34,7 @@ fn test_token() {
         r#"async%+await+
     +%awaitye
     await
+    awaye
     test_ident+
     awaityematies
     //test comment

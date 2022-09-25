@@ -102,6 +102,16 @@ fn construct_variant(item: &TokenParseData, enum_ident: &Ident) -> TokenStream2 
     }
 }
 
+struct SimpleRegexData {
+    pub token_index: usize,
+    pub regex: SimpleRegex,
+}
+
+struct RegexData {
+    pub token_index: usize,
+    pub regex: Regex,
+}
+
 fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
     if input.generics.params.len() > 1 || !matches!(input.generics.params.first(), None | Some(syn::GenericParam::Lifetime(_))) {
         return quote_spanned! {
@@ -307,7 +317,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
     }
 
     let mut simple_regexes = BTreeMap::new();
-    for item in tokens_to_parse.iter() {
+    for (token_index, item) in tokens_to_parse.iter().enumerate() {
         for simple_regex in &item.simple_regexes {
             let parsed = match SimpleRegex::parse(simple_regex) {
                 Some(x) => x,
@@ -318,12 +328,18 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                     }
                 }
             };
-            simple_regexes.insert((item.ident.clone(), simple_regex.clone()), parsed);
+            simple_regexes.insert(
+                (item.ident.clone(), simple_regex.clone()),
+                SimpleRegexData {
+                    token_index,
+                    regex: parsed,
+                },
+            );
         }
     }
 
     let mut regexes = BTreeMap::new();
-    for item in tokens_to_parse.iter() {
+    for (token_index, item) in tokens_to_parse.iter().enumerate() {
         for regex in &item.regexes {
             let modified_regex = format!("^{}", regex);
             let parsed = match Regex::new(&*modified_regex) {
@@ -335,7 +351,13 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                     }
                 }
             };
-            regexes.insert((item.ident.clone(), regex.clone()), parsed);
+            regexes.insert(
+                (item.ident.clone(), regex.clone()),
+                RegexData {
+                    token_index,
+                    regex: parsed,
+                },
+            );
         }
     }
 
@@ -345,7 +367,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
     let mut known_literals = HashSet::new();
 
     let mut lit_table = LitTable::default();
-    for item in tokens_to_parse.iter() {
+    for (token_index, item) in tokens_to_parse.iter().enumerate() {
         for literal in &item.literals {
             if !known_literals.insert(literal.clone()) {
                 return quote_spanned! {
@@ -355,7 +377,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
             }
             let mut any_matched = false;
             for ((ident, raw_regex), regex) in &simple_regexes {
-                if regex.matches(&**literal) {
+                if regex.token_index > token_index && regex.regex.matches(&**literal) {
                     simple_regex_ident_conflicts
                         .entry((ident.clone(), raw_regex.clone()))
                         .or_default()
@@ -367,7 +389,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                 continue;
             }
             for ((ident, raw_regex), regex) in &regexes {
-                if regex.is_match(&**literal) {
+                if regex.token_index > token_index && regex.regex.is_match(&**literal) {
                     regex_ident_conflicts
                         .entry((ident.clone(), raw_regex.clone()))
                         .or_default()
