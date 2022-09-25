@@ -4,6 +4,8 @@ use compiler_tools_derive::token_parse;
 #[token_parse]
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum Token<'a> {
+    #[token(regex = "%[0-9]+")]
+    PercentInt(&'a str),
     Async = "async",
     Await = "await",
     AwaitYe = "awaitye",
@@ -35,6 +37,7 @@ fn test_token() {
     +%awaitye
     await
     awaye
+    %234
     test_ident+
     awaityematies
     //test comment

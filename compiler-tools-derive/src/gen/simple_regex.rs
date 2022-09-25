@@ -10,16 +10,14 @@ pub(crate) fn gen_simple_regex(
     parsed: &BTreeMap<(Ident, String), SimpleRegexData>,
     conflicts: &BTreeMap<(Ident, String), Vec<(Ident, String)>>,
     enum_ident: &Ident,
-) -> Result<(TokenStream, TokenStream), TokenStream> {
-    let mut simple_regex_fns = vec![];
-    let mut simple_regex_calls = vec![];
-    for item in tokens_to_parse.iter() {
+    parse_fns: &mut BTreeMap<usize, Vec<TokenStream>>,
+) -> Result<(), TokenStream> {
+    for (token_index, item) in tokens_to_parse.iter().enumerate() {
         for simple_regex in &item.simple_regexes {
             let key = (item.ident.clone(), simple_regex.clone());
             let parsed = &parsed.get(&key).unwrap().regex;
             let fn_ident = format_ident!("parse_sr_{}", item.ident);
             let parse_fn = parsed.generate_parser(fn_ident.clone());
-            simple_regex_fns.push(parse_fn);
 
             let constructed = construct_variant(item, enum_ident);
 
@@ -72,8 +70,9 @@ pub(crate) fn gen_simple_regex(
             }
             let conflict_resolutions = flatten(conflict_resolutions);
 
-            simple_regex_calls.push(quote! {
+            parse_fns.entry(token_index).or_default().push(quote! {
                 {
+                    #parse_fn
                     if let Some((passed, remaining)) = #fn_ident(self.inner) {
                         let span = #span;
                         self.inner = remaining;
@@ -89,5 +88,6 @@ pub(crate) fn gen_simple_regex(
             });
         }
     }
-    Ok((flatten(simple_regex_fns), flatten(simple_regex_calls)))
+
+    Ok(())
 }

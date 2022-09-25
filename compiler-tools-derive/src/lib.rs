@@ -366,6 +366,8 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
     let mut regex_ident_conflicts: BTreeMap<(Ident, String), Vec<(Ident, String)>> = BTreeMap::new();
     let mut known_literals = HashSet::new();
 
+    let mut parse_fns: BTreeMap<usize, Vec<TokenStream2>> = BTreeMap::new();
+
     let mut lit_table = LitTable::default();
     for (token_index, item) in tokens_to_parse.iter().enumerate() {
         for literal in &item.literals {
@@ -407,15 +409,12 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
     let lit_table_name = format_ident!("parse_lits");
     let lit_table = lit_table.emit(&lit_table_name, &input.ident);
 
-    let (simple_regex_fns, simple_regex_calls) =
-        match gen::simple_regex::gen_simple_regex(&tokens_to_parse[..], &simple_regexes, &simple_regex_ident_conflicts, &input.ident) {
-            Ok(x) => x,
-            Err(e) => return e,
-        };
-    let (regex_fns, regex_calls) = match gen::full_regex::gen_full_regex(&tokens_to_parse[..], &regex_ident_conflicts, &input.ident) {
-        Ok(x) => x,
-        Err(e) => return e,
-    };
+    if let Err(e) = gen::simple_regex::gen_simple_regex(&tokens_to_parse[..], &simple_regexes, &simple_regex_ident_conflicts, &input.ident, &mut parse_fns) {
+        return e;
+    }
+    if let Err(e) = gen::full_regex::gen_full_regex(&tokens_to_parse[..], &regex_ident_conflicts, &input.ident, &mut parse_fns) {
+        return e;
+    }
 
     let lifetime_param = if has_lifetime_param {
         quote! { <'a> }
@@ -502,18 +501,20 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
 
     let class_matches = gen_class_match(&tokens_to_parse[..], &input.ident);
 
-    let mut custom_parse_fns: Vec<TokenStream2> = vec![];
-    for token in &tokens_to_parse {
+    for (token_index, token) in tokens_to_parse.iter().enumerate() {
         if let Some(parse_fn) = &token.parse_fn {
             let path_expr: ExprPath = match syn::parse_str(&parse_fn) {
                 Ok(x) => x,
                 Err(_e) => {
-                    custom_parse_fns.push(quote! { compile_error!("can't parse path for parse_fn"); });
+                    parse_fns
+                        .entry(token_index)
+                        .or_default()
+                        .push(quote! { compile_error!("can't parse path for parse_fn"); });
                     continue;
                 }
             };
             let constructed = construct_variant(token, &input.ident);
-            custom_parse_fns.push(quote! {
+            parse_fns.entry(token_index).or_default().push(quote! {
                 {
                     if let Some((passed, remaining)) = #path_expr(self.inner) {
                         let span = ::compiler_tools::Span {
@@ -545,7 +546,45 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
             });
         }
     }
-    let custom_parse_fns = flatten(custom_parse_fns);
+
+    let lit_table_parse = quote! {
+        match #lit_table_name(self.inner) {
+            Some((token, remaining, newlines)) => {
+                let span = ::compiler_tools::Span {
+                    line_start: self.line,
+                    col_start: self.col,
+                    line_stop: if newlines == 0 {
+                        self.line
+                    } else {
+                        self.line += newlines;
+                        self.line
+                    },
+                    col_stop: if newlines == 0 {
+                        self.col += (self.inner.len() - remaining.len()) as u64;
+                        self.col
+                    } else {
+                        //todo: handle utf8 better with newline seeking here
+                        let newline_offset = self.inner[..self.inner.len() - remaining.len()].as_bytes().iter().rev().position(|x| *x == b'\n').expect("malformed newline state");
+                        let newline_offset = (self.inner.len() - remaining.len()) - newline_offset;
+                        self.col = (newline_offset as u64).saturating_sub(1);
+                        self.col
+                    },
+                };
+                self.inner = remaining;
+                return Some(::compiler_tools::Spanned {
+                    token,
+                    span,
+                });
+            },
+            None => (),
+        }
+    };
+
+    if let Some(lit_table_index) = tokens_to_parse.iter().position(|x| !x.literals.is_empty()) {
+        parse_fns.entry(lit_table_index).or_default().push(lit_table_parse);
+    }
+
+    let parse_fns = flatten(parse_fns.into_values().flatten());
 
     quote! {
         #reinput
@@ -588,42 +627,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
             #[allow(non_snake_case, unreachable_pattern, unreachable_code)]
             fn next(&mut self) -> Option<::compiler_tools::Spanned<Self::Token>> {
                 #lit_table
-                #simple_regex_fns
-                #regex_fns
-
-                match #lit_table_name(self.inner) {
-                    Some((token, remaining, newlines)) => {
-                        let span = ::compiler_tools::Span {
-                            line_start: self.line,
-                            col_start: self.col,
-                            line_stop: if newlines == 0 {
-                                self.line
-                            } else {
-                                self.line += newlines;
-                                self.line
-                            },
-                            col_stop: if newlines == 0 {
-                                self.col += (self.inner.len() - remaining.len()) as u64;
-                                self.col
-                            } else {
-                                //todo: handle utf8 better with newline seeking here
-                                let newline_offset = self.inner[..self.inner.len() - remaining.len()].as_bytes().iter().rev().position(|x| *x == b'\n').expect("malformed newline state");
-                                let newline_offset = (self.inner.len() - remaining.len()) - newline_offset;
-                                self.col = (newline_offset as u64).saturating_sub(1);
-                                self.col
-                            },
-                        };
-                        self.inner = remaining;
-                        return Some(::compiler_tools::Spanned {
-                            token,
-                            span,
-                        });
-                    },
-                    None => (),
-                }
-                #simple_regex_calls
-                #regex_calls
-                #custom_parse_fns
+                #parse_fns
                 #illegal_emission
             }
         }

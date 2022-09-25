@@ -9,16 +9,15 @@ pub(crate) fn gen_full_regex(
     tokens_to_parse: &[TokenParseData],
     conflicts: &BTreeMap<(Ident, String), Vec<(Ident, String)>>,
     enum_ident: &Ident,
-) -> Result<(TokenStream, TokenStream), TokenStream> {
-    let mut regex_fns = vec![];
-    let mut regex_calls = vec![];
-    for item in tokens_to_parse.iter() {
+    parse_fns: &mut BTreeMap<usize, Vec<TokenStream>>,
+) -> Result<(), TokenStream> {
+    for (token_index, item) in tokens_to_parse.iter().enumerate() {
         for regex in &item.regexes {
             let key = (item.ident.clone(), regex.clone());
             let regex = format!("\\A(?:{})", regex);
 
             let fn_ident = format_ident!("parse_r_{}", item.ident);
-            regex_fns.push(quote! {
+            let regex_fn = quote! {
                 fn #fn_ident(from: &str) -> Option<(&str, &str)> {
                     static REGEX: ::compiler_tools::once_cell::sync::OnceCell<::compiler_tools::regex::Regex> = ::compiler_tools::once_cell::sync::OnceCell::new();
                     let regex = REGEX.get_or_init(|| ::compiler_tools::regex::Regex::new(#regex).unwrap());
@@ -29,7 +28,7 @@ pub(crate) fn gen_full_regex(
                         None
                     }
                 }
-            });
+            };
 
             let constructed = construct_variant(item, enum_ident);
 
@@ -68,8 +67,9 @@ pub(crate) fn gen_full_regex(
             }
             let conflict_resolutions = flatten(conflict_resolutions);
 
-            regex_calls.push(quote! {
+            parse_fns.entry(token_index).or_default().push(quote! {
                 {
+                    #regex_fn
                     if let Some((passed, remaining)) = #fn_ident(self.inner) {
                         let span = #span;
                         self.inner = remaining;
@@ -85,5 +85,5 @@ pub(crate) fn gen_full_regex(
             });
         }
     }
-    Ok((flatten(regex_fns), flatten(regex_calls)))
+    Ok(())
 }
