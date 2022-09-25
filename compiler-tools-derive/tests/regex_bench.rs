@@ -8,6 +8,8 @@ use compiler_tools_derive::token_parse;
 pub enum TokenSimple<'a> {
     Async = "async",
     Plus = "+",
+    #[token(regex = "(?i)\\*|\\+")]
+    OrTest(&'a str),
     #[token(regex = "[a-z][a-zA-Z0-9_]*")]
     Ident(&'a str),
     #[token(regex = "/\\*.*\\*/")]
@@ -30,6 +32,14 @@ fn duration_ms(duration: Duration) -> f64 {
 }
 
 const TEST_COUNT: usize = 100000;
+
+#[test]
+fn test_regex_or() {
+    let str = "sdf+sdfsdf*+*sdfsdf+*sdfsdf+*sdf";
+
+    let mut tokenizer = TokenizerSimple::new(str);
+    while tokenizer.next().is_some() {}
+}
 
 // cargo test --release --package compiler-tools-derive --test regex_bench -- bench_simple --exact --nocapture
 // took 1.21 ms for 100000 idents @ 0.0000 ms/ident

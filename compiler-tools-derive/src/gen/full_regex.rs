@@ -15,7 +15,7 @@ pub(crate) fn gen_full_regex(
     for item in tokens_to_parse.iter() {
         for regex in &item.regexes {
             let key = (item.ident.clone(), regex.clone());
-            let regex = format!("^{}", regex);
+            let regex = format!("\\A(?:{})", regex);
 
             let fn_ident = format_ident!("parse_r_{}", item.ident);
             regex_fns.push(quote! {
