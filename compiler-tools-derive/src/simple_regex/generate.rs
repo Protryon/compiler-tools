@@ -22,13 +22,13 @@ impl SimpleRegex {
                                     if !matching.is_empty() {
                                         matching.push(quote! { | })
                                     }
-                                    matching.push(quote! { Some(#c) });
+                                    matching.push(quote! { #c });
                                 }
                                 GroupEntry::Range(start, end) => {
                                     if !matching.is_empty() {
                                         matching.push(quote! { | })
                                     }
-                                    matching.push(quote! { Some(#start ..= #end) });
+                                    matching.push(quote! { #start ..= #end });
                                 }
                             }
                         }
@@ -42,12 +42,12 @@ impl SimpleRegex {
                                 }
                             } else {
                                 quote! {
-                                    c if !matches!(c, #matching) => ::compiler_tools::MatchResult::Matched(#target),
+                                    Some(c) if !matches!(c, #matching) => ::compiler_tools::MatchResult::Matched(#target),
                                 }
                             }
                         } else {
                             quote! {
-                                #matching => ::compiler_tools::MatchResult::Matched(#target),
+                                Some(c) if matches!(c, #matching) => ::compiler_tools::MatchResult::Matched(#target),
                             }
                         }
                     }
@@ -102,7 +102,9 @@ impl SimpleRegex {
                     match next_state {
                         ::compiler_tools::MatchResult::Matched(next_state) => {
                             state = next_state;
-                            counter += c.unwrap().len_utf8();
+                            if let Some(c) = c {
+                                counter += c.len_utf8();
+                            }
                             if next_state == #final_state {
                                 return Some((&from[..counter], &from[counter..]));
                             }

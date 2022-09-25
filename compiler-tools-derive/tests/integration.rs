@@ -51,7 +51,7 @@ fn test_token() {
     *
     block */
     new_ident
-    "#,
+    //comment end"#,
     );
     while let Some(next) = tokenizer.next() {
         println!("{:?}", next);
