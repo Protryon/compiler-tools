@@ -10,7 +10,7 @@ keywords = [ "compiler", "parser", "generator" ]
 
 [dependencies]
 serde = { version = "1.0", optional = true, features = ["derive"] }
-regex = { version = "1.5", optional = true }
+regex = { version = "1.10", optional = true }
 once_cell = { version = "1.10", optional = true }
 
 [features]
