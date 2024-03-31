@@ -19,7 +19,7 @@ pub(crate) fn gen_full_regex(
             let fn_ident = format_ident!("parse_r_{}", item.ident);
             let regex_fn = quote! {
                 fn #fn_ident(from: &str) -> Option<(&str, &str)> {
-                    static REGEX: ::compiler_tools::once_cell::sync::OnceCell<::compiler_tools::regex::Regex> = ::compiler_tools::once_cell::sync::OnceCell::new();
+                    static REGEX: ::std::sync::OnceLock<::compiler_tools::regex::Regex> = ::std::sync::OnceLock::new();
                     let regex = REGEX.get_or_init(|| ::compiler_tools::regex::Regex::new(#regex).unwrap());
                     if let Some(matching) = regex.find(from) {
                         assert_eq!(matching.start(), 0);

@@ -11,8 +11,4 @@ pub mod util;
 
 #[cfg(feature = "use_regex")]
 #[doc(hidden)]
-pub use once_cell;
-
-#[cfg(feature = "use_regex")]
-#[doc(hidden)]
 pub use regex;
