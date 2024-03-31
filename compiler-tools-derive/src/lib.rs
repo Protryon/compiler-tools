@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, HashSet};
 
 use indexmap::IndexMap;
 use proc_macro::TokenStream;
-use proc_macro2::{Delimiter, Ident, TokenStream as TokenStream2, TokenTree};
+use proc_macro2::{Ident, TokenStream as TokenStream2, TokenTree};
 use quote::{format_ident, quote, quote_spanned, ToTokens, TokenStreamExt};
 use regex::Regex;
-use syn::{parse_macro_input, spanned::Spanned, DeriveInput, Expr, ExprLit, ExprPath, Fields, FieldsUnnamed, Lifetime, Lit, Type};
+use syn::{parse_macro_input, spanned::Spanned, DeriveInput, Expr, ExprLit, ExprPath, Fields, FieldsUnnamed, Lifetime, Lit, Meta, Type};
 
 use crate::{gen::class_match::gen_class_match, lit_table::LitTable, simple_regex::SimpleRegex};
 
@@ -37,16 +37,8 @@ struct TokenParseData {
 }
 
 fn parse_attributes(input: TokenStream2) -> Option<IndexMap<String, Option<String>>> {
-    let mut tokens = input.into_iter().peekable();
-    let mut tokens = if let Some(TokenTree::Group(group)) = tokens.peek() {
-        if group.delimiter() == Delimiter::Parenthesis {
-            group.stream().into_iter()
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
+    let mut tokens = input.into_iter();
+
     let mut attributes = IndexMap::<String, Option<String>>::new();
 
     loop {
@@ -151,10 +143,15 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
         };
 
         for attribute in &variant.attrs {
-            if attribute.path.segments.len() != 1 || attribute.path.segments.first().unwrap().ident != "token" {
+            if !attribute.path().is_ident("token") {
                 continue;
             }
-            let attributes = match parse_attributes(attribute.tokens.clone()) {
+
+            let Meta::List(meta) = &attribute.meta else {
+                continue;
+            };
+
+            let attributes = match parse_attributes(meta.tokens.clone()) {
                 Some(x) => x,
                 None => {
                     return quote_spanned! {
@@ -480,7 +477,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                 variant
                     .attrs
                     .iter()
-                    .filter(|a| a.path.segments.len() != 1 || a.path.segments.first().unwrap().ident != "token"),
+                    .filter(|a| a.path().segments.len() != 1 || a.path().segments.first().unwrap().ident != "token"),
             );
             let ident = &variant.ident;
             let fields = &variant.fields;
