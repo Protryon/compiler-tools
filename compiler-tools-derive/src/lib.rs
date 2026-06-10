@@ -7,9 +7,9 @@ use quote::{format_ident, quote, quote_spanned, ToTokens, TokenStreamExt};
 use regex::Regex;
 use syn::{parse_macro_input, spanned::Spanned, DeriveInput, Expr, ExprLit, ExprPath, Fields, FieldsUnnamed, Lifetime, Lit, Meta, Type};
 
-use crate::{gen::class_match::gen_class_match, lit_table::LitTable, simple_regex::SimpleRegex};
+use crate::{codegen::class_match::gen_class_match, lit_table::LitTable, simple_regex::SimpleRegex};
 
-mod gen;
+mod codegen;
 mod lit_table;
 mod simple_regex;
 
@@ -406,10 +406,10 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
     let lit_table_name = format_ident!("parse_lits");
     let lit_table = lit_table.emit(&lit_table_name, &input.ident);
 
-    if let Err(e) = gen::simple_regex::gen_simple_regex(&tokens_to_parse[..], &simple_regexes, &simple_regex_ident_conflicts, &input.ident, &mut parse_fns) {
+    if let Err(e) = codegen::simple_regex::gen_simple_regex(&tokens_to_parse[..], &simple_regexes, &simple_regex_ident_conflicts, &input.ident, &mut parse_fns) {
         return e;
     }
-    if let Err(e) = gen::full_regex::gen_full_regex(&tokens_to_parse[..], &regex_ident_conflicts, &input.ident, &mut parse_fns) {
+    if let Err(e) = codegen::full_regex::gen_full_regex(&tokens_to_parse[..], &regex_ident_conflicts, &input.ident, &mut parse_fns) {
         return e;
     }
 
@@ -427,7 +427,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
     let token_ident = &input.ident;
     let vis = &input.vis;
 
-    let display_fields = gen::display::gen_display(&tokens_to_parse[..], &input.ident);
+    let display_fields = codegen::display::gen_display(&tokens_to_parse[..], &input.ident);
 
     let illegal_emission = if let Some(illegal) = tokens_to_parse.iter().find(|x| x.is_illegal) {
         let constructor = construct_variant(illegal, &input.ident);

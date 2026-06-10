@@ -1,13 +1,13 @@
 [package]
 name = "compiler-tools"
 version = "0.2.0"
-edition = "2021"
+edition = "2024"
 authors = ["Protryon <max.bruce12@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Protryon/compiler-tools"
 description = "A proc-macro for deriving powerful and fast tokenizers with compile-time regex"
 keywords = [ "compiler", "parser", "generator" ]
-rust-version = "1.75.0"
+rust-version = "1.85.0"
 
 [dependencies]
 serde = { version = "1.0", optional = true, features = ["derive"] }
