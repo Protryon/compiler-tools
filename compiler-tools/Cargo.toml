@@ -11,7 +11,7 @@ rust-version = "1.85.0"
 
 [dependencies]
 serde = { version = "1.0", optional = true, features = ["derive"] }
-regex = { version = "1.10", optional = true }
+regex = { version = "1.12", optional = true }
 
 [features]
 default = ["serde", "use_regex"]
