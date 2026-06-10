@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, HashSet};
 use indexmap::IndexMap;
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, TokenStream as TokenStream2, TokenTree};
-use quote::{format_ident, quote, quote_spanned, ToTokens, TokenStreamExt};
+use quote::{ToTokens, TokenStreamExt, format_ident, quote, quote_spanned};
 use regex::Regex;
-use syn::{parse_macro_input, spanned::Spanned, DeriveInput, Expr, ExprLit, ExprPath, Fields, FieldsUnnamed, Lifetime, Lit, Meta, Type};
+use syn::{DeriveInput, Expr, ExprLit, ExprPath, Fields, FieldsUnnamed, Lifetime, Lit, Meta, Type, parse_macro_input, spanned::Spanned};
 
 use crate::{codegen::class_match::gen_class_match, lit_table::LitTable, simple_regex::SimpleRegex};
 
@@ -124,7 +124,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
             return quote_spanned! {
                 input.span() =>
                 compile_error!("TokenParse can only be derived on enums");
-            }
+            };
         }
     };
 
@@ -157,7 +157,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                     return quote_spanned! {
                         attribute.span() =>
                         compile_error!("invalid attribute syntax");
-                    }
+                    };
                 }
             };
             for (name, value) in attributes {
@@ -207,7 +207,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                         return quote_spanned! {
                             attribute.span() =>
                             compile_error!("unknown attribute");
-                        }
+                        };
                     }
                 }
             }
@@ -322,7 +322,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                     return quote_spanned! {
                         item.ident.span() =>
                         compile_error!("invalid simple regex");
-                    }
+                    };
                 }
             };
             simple_regexes.insert(
@@ -345,7 +345,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                     return quote_spanned! {
                         item.ident.span() =>
                         compile_error!("invalid simple regex");
-                    }
+                    };
                 }
             };
             regexes.insert(
@@ -406,7 +406,8 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
     let lit_table_name = format_ident!("parse_lits");
     let lit_table = lit_table.emit(&lit_table_name, &input.ident);
 
-    if let Err(e) = codegen::simple_regex::gen_simple_regex(&tokens_to_parse[..], &simple_regexes, &simple_regex_ident_conflicts, &input.ident, &mut parse_fns) {
+    if let Err(e) = codegen::simple_regex::gen_simple_regex(&tokens_to_parse[..], &simple_regexes, &simple_regex_ident_conflicts, &input.ident, &mut parse_fns)
+    {
         return e;
     }
     if let Err(e) = codegen::full_regex::gen_full_regex(&tokens_to_parse[..], &regex_ident_conflicts, &input.ident, &mut parse_fns) {
@@ -437,9 +438,9 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                     line_start: self.line,
                     col_start: self.col,
                     line_stop: if value == '\n' {
+                        self.line += 1;
                         self.line
                     } else {
-                        self.line += 1;
                         self.line
                     },
                     col_stop: if value != '\n' {

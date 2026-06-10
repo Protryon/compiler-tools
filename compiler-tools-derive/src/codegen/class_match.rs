@@ -1,7 +1,7 @@
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
 
-use crate::{flatten, TokenParseData};
+use crate::{TokenParseData, flatten};
 
 pub(crate) fn gen_class_match(tokens_to_parse: &[TokenParseData], enum_ident: &Ident) -> TokenStream {
     let mut matches = vec![];

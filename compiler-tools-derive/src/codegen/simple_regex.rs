@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 
-use crate::{construct_variant, flatten, SimpleRegexData, TokenParseData};
+use crate::{SimpleRegexData, TokenParseData, construct_variant, flatten};
 
 pub(crate) fn gen_simple_regex(
     tokens_to_parse: &[TokenParseData],

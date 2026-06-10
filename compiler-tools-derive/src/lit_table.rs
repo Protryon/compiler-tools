@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
 
-use crate::{flatten, TokenParseData};
+use crate::{TokenParseData, flatten};
 
 #[derive(Default)]
 pub(super) struct LitTable {

@@ -70,3 +70,101 @@ impl<'a, T: TokenParse<'a>> TokenizerWrap<'a, T> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::span::Span;
+
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum Tok {
+        A,
+        B,
+        Ws,
+    }
+
+    impl TokenExt for Tok {
+        fn matches_class(&self, other: &Self) -> bool {
+            self == other
+        }
+    }
+
+    struct VecTokenizer {
+        tokens: std::vec::IntoIter<Tok>,
+    }
+
+    impl<'a> TokenParse<'a> for VecTokenizer {
+        type Token = Tok;
+
+        fn next(&mut self) -> Option<Spanned<Tok>> {
+            self.tokens.next().map(|token| Spanned {
+                token,
+                span: Span::default(),
+            })
+        }
+    }
+
+    fn wrap(tokens: Vec<Tok>, ignore: Vec<Tok>) -> TokenizerWrap<'static, VecTokenizer> {
+        TokenizerWrap::new(
+            VecTokenizer {
+                tokens: tokens.into_iter(),
+            },
+            ignore,
+        )
+    }
+
+    fn val(spanned: Option<Spanned<Tok>>) -> Option<Tok> {
+        spanned.map(|s| *s)
+    }
+
+    #[test]
+    fn next_skips_ignored_tokens() {
+        let mut w = wrap(vec![Tok::A, Tok::Ws, Tok::Ws, Tok::B, Tok::Ws], vec![Tok::Ws]);
+        assert_eq!(val(w.next()), Some(Tok::A));
+        assert_eq!(val(w.next()), Some(Tok::B));
+        assert_eq!(val(w.next()), None);
+    }
+
+    #[test]
+    fn peek_does_not_consume() {
+        let mut w = wrap(vec![Tok::A, Tok::B], vec![]);
+        assert_eq!(val(w.peek().copied()), Some(Tok::A));
+        assert_eq!(val(w.peek().copied()), Some(Tok::A));
+        assert_eq!(val(w.next()), Some(Tok::A));
+        assert_eq!(val(w.next()), Some(Tok::B));
+        assert_eq!(val(w.peek().copied()), None);
+    }
+
+    #[test]
+    fn eat_consumes_on_match_and_restores_on_miss() {
+        let mut w = wrap(vec![Tok::A, Tok::B], vec![]);
+        assert_eq!(val(w.eat(Tok::A)), Some(Tok::A));
+        // next token is B, so eating A fails and B is put back
+        assert_eq!(val(w.eat(Tok::A)), None);
+        assert_eq!(val(w.eat(Tok::B)), Some(Tok::B));
+        assert_eq!(val(w.next()), None);
+    }
+
+    #[test]
+    fn eat_any_matches_any_listed_class() {
+        let mut w = wrap(vec![Tok::A, Tok::B], vec![]);
+        assert_eq!(val(w.eat_any(&[Tok::B, Tok::A])), Some(Tok::A));
+        // next is B, not in the list, so it is restored
+        assert_eq!(val(w.eat_any(&[Tok::A])), None);
+        assert_eq!(val(w.eat_any(&[Tok::B])), Some(Tok::B));
+    }
+
+    #[test]
+    fn eat_skips_ignored_tokens() {
+        let mut w = wrap(vec![Tok::Ws, Tok::Ws, Tok::A], vec![Tok::Ws]);
+        assert_eq!(val(w.eat(Tok::A)), Some(Tok::A));
+    }
+
+    #[test]
+    fn peek_then_eat_returns_same_token() {
+        let mut w = wrap(vec![Tok::A], vec![]);
+        assert_eq!(val(w.peek().copied()), Some(Tok::A));
+        assert_eq!(val(w.eat(Tok::A)), Some(Tok::A));
+        assert_eq!(val(w.peek().copied()), None);
+    }
+}
