@@ -1,7 +1,13 @@
-use proc_macro2::{Ident, TokenStream};
-use quote::quote;
+//! The compile-time "simple-regex" engine that backs `#[token(regex = "...")]`.
+//!
+//! It compiles a small regex dialect into a branch-only DFA and can both
+//! interpret it at runtime ([`SimpleRegex::find_prefix`]) and emit a self-contained
+//! Rust matcher from it ([`SimpleRegex::generate_parser`]). The proc-macro crate
+//! (`compiler-tools-derive`) consumes the latter; the conformance test crate
+//! exercises both against the upstream `regex` test corpus.
 
-use crate::flatten;
+use proc_macro2::{Ident, TokenStream};
+use quote::{ToTokens, TokenStreamExt, quote};
 
 use self::{dfa::Dfa, nfa::Nfa};
 
@@ -10,6 +16,16 @@ mod generate;
 mod matching;
 mod nfa;
 mod parse;
+
+/// Collect an iterator of token-producing values into one [`TokenStream`].
+///
+/// Shared by the macro crate and this engine's code generation; lives here so
+/// the engine has no dependency back on the proc-macro crate.
+pub fn flatten<S: ToTokens, T: IntoIterator<Item = S>>(iter: T) -> TokenStream {
+    let mut out = quote! {};
+    out.append_all(iter);
+    out
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum Repeat {

@@ -95,7 +95,7 @@ impl Dfa {
 
 #[cfg(test)]
 mod tests {
-    use crate::simple_regex::SimpleRegexAst;
+    use crate::SimpleRegexAst;
 
     use super::*;
 

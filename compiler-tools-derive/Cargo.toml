@@ -18,6 +18,7 @@ quote = "1.0"
 proc-macro2 = "1.0"
 indexmap = "2.14"
 regex = { version = "1.12" }
+compiler-tools-regex = { version = "0.2.0", path = "../compiler-tools-regex" }
 
 [dev-dependencies]
 compiler-tools = { version = "0.2.0", path = "../compiler-tools" }

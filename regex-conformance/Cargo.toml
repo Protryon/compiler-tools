@@ -1,0 +1,21 @@
+[package]
+name = "regex-conformance"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Runs the upstream regex test corpus (testdata/) against both compiler-tools simple-regex engines"
+rust-version = "1.85.0"
+
+[dependencies]
+# The runtime interpreter under test, plus the runtime crate the generated
+# compiled matchers refer to via `::compiler_tools::...`.
+compiler-tools-regex = { version = "0.2.0", path = "../compiler-tools-regex" }
+compiler-tools = { version = "0.2.0", path = "../compiler-tools" }
+regex-test = "0.1"
+
+[build-dependencies]
+# The build script uses the engine to code-generate one compiled matcher per test.
+compiler-tools-regex = { version = "0.2.0", path = "../compiler-tools-regex" }
+regex-test = "0.1"
+quote = "1.0"
+proc-macro2 = "1.0"

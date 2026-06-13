@@ -48,6 +48,10 @@ impl SimpleRegex {
                             } else {
                                 quote! { Some(c) if !matches!(c, #matching) => ::compiler_tools::MatchResult::Matched(#target), }
                             }
+                        } else if matching_empty {
+                            // An empty, non-negated class matches no character, so emit no
+                            // arm at all (an empty `matches!(c, )` would be invalid Rust).
+                            quote! {}
                         } else {
                             quote! { Some(c) if matches!(c, #matching) => ::compiler_tools::MatchResult::Matched(#target), }
                         });

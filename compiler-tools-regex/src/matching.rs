@@ -42,6 +42,114 @@ impl SimpleRegex {
         }
         false
     }
+
+    /// Run the DFA as a runtime interpreter, returning the matched prefix and the
+    /// remaining input — the same `(matched, remaining)` contract the generated
+    /// (`generate_parser`) matcher produces.
+    ///
+    /// This deliberately mirrors the generated code's per-state evaluation so the
+    /// "runtime interpreter" and "compiled" engines stay in lock-step: consuming
+    /// edges win over zero-width ones, `$`/`\z` only fires at end of input, an NFA
+    /// `End` edge accepts unconditionally, and word boundaries are checked against
+    /// the previous and lookahead chars without consuming. The match is anchored at
+    /// the start of `from` (a prefix match); callers do unanchored searches by
+    /// advancing the start position themselves.
+    #[allow(dead_code)] // exercised by the conformance unit tests, not the macro itself
+    pub fn find_prefix<'a>(&self, from: &'a str) -> Option<(&'a str, &'a str)> {
+        let mut counter = 0usize;
+        let mut state = 0u32;
+        let mut prev: Option<char> = None;
+        let mut chars = from.chars();
+        let mut c = chars.next();
+        loop {
+            // The final state has no transition entry; any other missing state is a dead end.
+            let transitions = self.dfa.transitions.get(&state)?;
+            match eval_state(transitions, prev, c) {
+                Step::Matched(next) => {
+                    state = next;
+                    if let Some(ch) = c {
+                        counter += ch.len_utf8();
+                    }
+                    prev = c;
+                    c = chars.next();
+                    if next == self.dfa.final_state {
+                        return Some((&from[..counter], &from[counter..]));
+                    }
+                }
+                Step::MatchedEmpty(next) => {
+                    // Zero-width transition: keep the lookahead char and byte position.
+                    state = next;
+                    if next == self.dfa.final_state {
+                        return Some((&from[..counter], &from[counter..]));
+                    }
+                }
+                Step::NoMatch => return None,
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+enum Step {
+    Matched(u32),
+    MatchedEmpty(u32),
+    NoMatch,
+}
+
+#[allow(dead_code)]
+fn is_word(ch: Option<char>) -> bool {
+    matches!(ch, Some('0'..='9' | 'a'..='z' | 'A'..='Z' | '_'))
+}
+
+/// Evaluate one DFA state for the runtime interpreter, matching the priority the
+/// generated matcher uses: consuming edges (in declaration order) first, then a
+/// fallback where an `End` edge accepts unconditionally and word boundaries are
+/// tested against `prev`/`c`.
+#[allow(dead_code)]
+fn eval_state(transitions: &[(super::nfa::TransitionEvent, u32)], prev: Option<char>, c: Option<char>) -> Step {
+    use super::nfa::TransitionEvent;
+    for (transition, target) in transitions {
+        match transition {
+            TransitionEvent::Char(ch) => {
+                if c == Some(*ch) {
+                    return Step::Matched(*target);
+                }
+            }
+            TransitionEvent::Chars(inverted, group) => {
+                if let Some(ch) = c {
+                    let in_group = group.iter().any(|entry| match entry {
+                        GroupEntry::Char(g) => *g == ch,
+                        GroupEntry::Range(start, end) => *start <= ch && *end >= ch,
+                    });
+                    if in_group != *inverted {
+                        return Step::Matched(*target);
+                    }
+                }
+            }
+            TransitionEvent::EndOfInput => {
+                if c.is_none() {
+                    return Step::MatchedEmpty(*target);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Fallback: an `End` edge (if present) accepts unconditionally and outranks
+    // any word boundary, matching `generate_parser`'s fallback arm.
+    for (transition, target) in transitions {
+        if let TransitionEvent::End = transition {
+            return Step::MatchedEmpty(*target);
+        }
+    }
+    for (transition, target) in transitions {
+        if let TransitionEvent::WordBoundary(negate) = transition {
+            let boundary = is_word(prev) != is_word(c);
+            if boundary != *negate {
+                return Step::MatchedEmpty(*target);
+            }
+        }
+    }
+    Step::NoMatch
 }
 
 #[cfg(test)]

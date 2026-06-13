@@ -2,5 +2,7 @@
 resolver = "2"
 members = [
     "compiler-tools",
+    "compiler-tools-regex",
     "compiler-tools-derive",
+    "regex-conformance",
 ]

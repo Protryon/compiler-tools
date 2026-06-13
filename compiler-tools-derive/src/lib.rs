@@ -3,26 +3,21 @@ use std::collections::{BTreeMap, HashSet};
 use indexmap::IndexMap;
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, TokenStream as TokenStream2, TokenTree};
-use quote::{ToTokens, TokenStreamExt, format_ident, quote, quote_spanned};
+use quote::{format_ident, quote, quote_spanned};
 use regex::Regex;
 use syn::{DeriveInput, Expr, ExprLit, ExprPath, Fields, FieldsUnnamed, Lifetime, Lit, Meta, Type, parse_macro_input, spanned::Spanned};
 
-use crate::{codegen::class_match::gen_class_match, lit_table::LitTable, simple_regex::SimpleRegex};
+use compiler_tools_regex::{SimpleRegex, flatten};
+
+use crate::{codegen::class_match::gen_class_match, lit_table::LitTable};
 
 mod codegen;
 mod lit_table;
-mod simple_regex;
 
 #[proc_macro_attribute]
 pub fn token_parse(_metadata: TokenStream, input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
     impl_token_parse(&ast).into()
-}
-
-fn flatten<S: ToTokens, T: IntoIterator<Item = S>>(iter: T) -> TokenStream2 {
-    let mut out = quote! {};
-    out.append_all(iter);
-    out
 }
 
 struct TokenParseData {
