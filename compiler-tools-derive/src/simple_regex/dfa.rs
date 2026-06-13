@@ -44,7 +44,7 @@ impl Dfa {
                 .map(|(shadowed, shadows)| {
                     (
                         epsilon_closure.get(shadowed).unwrap().clone().1,
-                        shadows.into_iter().map(|shadow| epsilon_closure.get(shadow).unwrap().clone()).collect(),
+                        shadows.iter().map(|shadow| epsilon_closure.get(shadow).unwrap().clone()).collect(),
                     )
                 })
                 .collect();
@@ -52,6 +52,7 @@ impl Dfa {
             let total = epsilon_closure.len();
             let mut emitted_closures = vec![];
             while emitted_closures.len() < total {
+                let progress_before = emitted_closures.len();
                 for i in 0..total {
                     if !epsilon_closure.contains_key(&i) {
                         continue;
@@ -62,6 +63,17 @@ impl Dfa {
                             shadowing.retain(|x| *x != i);
                         }
                     }
+                }
+                // A pass that emits nothing means the remaining closures shadow each other
+                // in a cycle, so no priority ordering exists. Break the tie by emitting them
+                // in index order rather than spinning forever.
+                if emitted_closures.len() == progress_before {
+                    for i in 0..total {
+                        if let Some(closure) = epsilon_closure.remove(&i) {
+                            emitted_closures.push(closure);
+                        }
+                    }
+                    break;
                 }
             }
             emitted_closures.reverse();

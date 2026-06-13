@@ -1,5 +1,15 @@
 use super::*;
 
+/// Pops the pending `Char('-')` and the range's start char off `entries`, returning
+/// the start char. Returns `None` on a malformed state rather than panicking, so a bad
+/// pattern surfaces as a `compile_error!` instead of an ICE-style proc-macro panic.
+fn pop_range_start(entries: &mut Vec<GroupEntry>) -> Option<char> {
+    match (entries.pop(), entries.pop()) {
+        (Some(GroupEntry::Char('-')), Some(GroupEntry::Char(start))) => Some(start),
+        _ => None,
+    }
+}
+
 fn parse_group(iter: &mut impl Iterator<Item = char>) -> Option<Atom> {
     let mut group_entries = vec![];
     let mut escaped = false;
@@ -22,13 +32,7 @@ fn parse_group(iter: &mut impl Iterator<Item = char>) -> Option<Atom> {
             }
             Some(c) => {
                 if in_range {
-                    assert_eq!(group_entries.pop(), Some(GroupEntry::Char('-')));
-                    let start = group_entries.pop().expect("malformed state during group formation");
-                    let start = if let GroupEntry::Char(c) = start {
-                        c
-                    } else {
-                        panic!("malformed state during group formation");
-                    };
+                    let start = pop_range_start(&mut group_entries)?;
                     in_range = false;
                     group_entries.push(GroupEntry::Range(start, c))
                 } else {
@@ -41,13 +45,7 @@ fn parse_group(iter: &mut impl Iterator<Item = char>) -> Option<Atom> {
     }
     if escaped {
         if in_range {
-            assert_eq!(group_entries.pop(), Some(GroupEntry::Char('-')));
-            let start = group_entries.pop().expect("malformed state during group formation");
-            let start = if let GroupEntry::Char(c) = start {
-                c
-            } else {
-                panic!("malformed state during group formation");
-            };
+            let start = pop_range_start(&mut group_entries)?;
             group_entries.push(GroupEntry::Range(start, '\\'))
         } else {
             group_entries.push(GroupEntry::Char('\\'));

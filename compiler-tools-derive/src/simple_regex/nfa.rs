@@ -60,7 +60,7 @@ pub struct Nfa {
 
 fn event_from_atom(atom: &Atom) -> Vec<TransitionEvent> {
     match atom {
-        Atom::Literal(l) => l.chars().map(|x| TransitionEvent::Char(x)).collect(),
+        Atom::Literal(l) => l.chars().map(TransitionEvent::Char).collect(),
         Atom::Group(inverted, entries) => {
             vec![TransitionEvent::Chars(*inverted, entries.clone())]
         }

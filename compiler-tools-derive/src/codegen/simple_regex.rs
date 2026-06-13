@@ -31,9 +31,10 @@ pub(crate) fn gen_simple_regex(
                             self.line
                         },
                         //todo: handle utf8 better with newline seeking here
-                        col_stop: if let Some(newline_offset) = passed.as_bytes().iter().rev().position(|x| *x == b'\n') {
-                            let newline_offset = passed.len() - newline_offset;
-                            self.col = (newline_offset as u64).saturating_sub(1);
+                        col_stop: if let Some(trailing_bytes) = passed.as_bytes().iter().rev().position(|x| *x == b'\n') {
+                            // `trailing_bytes` is the number of bytes after the last newline,
+                            // which is the column on the final line.
+                            self.col = trailing_bytes as u64;
                             self.col
                         } else {
                             self.col += passed.len() as u64;

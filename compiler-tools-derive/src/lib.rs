@@ -339,7 +339,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
     for (token_index, item) in tokens_to_parse.iter().enumerate() {
         for regex in &item.regexes {
             let modified_regex = format!("^{}", regex);
-            let parsed = match Regex::new(&*modified_regex) {
+            let parsed = match Regex::new(&modified_regex) {
                 Ok(x) => x,
                 Err(_) => {
                     return quote_spanned! {
@@ -376,7 +376,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
             }
             let mut any_matched = false;
             for ((ident, raw_regex), regex) in &simple_regexes {
-                if regex.token_index > token_index && regex.regex.matches(&**literal) {
+                if regex.token_index > token_index && regex.regex.matches(literal) {
                     simple_regex_ident_conflicts
                         .entry((ident.clone(), raw_regex.clone()))
                         .or_default()
@@ -388,7 +388,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                 continue;
             }
             for ((ident, raw_regex), regex) in &regexes {
-                if regex.token_index > token_index && regex.regex.is_match(&**literal) {
+                if regex.token_index > token_index && regex.regex.is_match(literal) {
                     regex_ident_conflicts
                         .entry((ident.clone(), raw_regex.clone()))
                         .or_default()
@@ -399,7 +399,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
             if any_matched {
                 continue;
             }
-            lit_table.push(item, &**literal, &mut literal.chars());
+            lit_table.push(item, literal, &mut literal.chars());
         }
     }
 
@@ -501,7 +501,7 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
 
     for (token_index, token) in tokens_to_parse.iter().enumerate() {
         if let Some(parse_fn) = &token.parse_fn {
-            let path_expr: ExprPath = match syn::parse_str(&parse_fn) {
+            let path_expr: ExprPath = match syn::parse_str(parse_fn) {
                 Ok(x) => x,
                 Err(_e) => {
                     parse_fns
@@ -523,9 +523,10 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                                 self.line
                             },
                             //todo: handle utf8 better with newline seeking here
-                            col_stop: if let Some(newline_offset) = passed.as_bytes().iter().rev().position(|x| *x == b'\n') {
-                                let newline_offset = passed.len() - newline_offset;
-                                self.col = (newline_offset as u64).saturating_sub(1);
+                            col_stop: if let Some(trailing_bytes) = passed.as_bytes().iter().rev().position(|x| *x == b'\n') {
+                                // `trailing_bytes` is the number of bytes after the last newline,
+                                // which is the column on the final line.
+                                self.col = trailing_bytes as u64;
                                 self.col
                             } else {
                                 self.col += passed.len() as u64;
@@ -562,9 +563,10 @@ fn impl_token_parse(input: &DeriveInput) -> proc_macro2::TokenStream {
                         self.col
                     } else {
                         //todo: handle utf8 better with newline seeking here
-                        let newline_offset = self.inner[..self.inner.len() - remaining.len()].as_bytes().iter().rev().position(|x| *x == b'\n').expect("malformed newline state");
-                        let newline_offset = (self.inner.len() - remaining.len()) - newline_offset;
-                        self.col = (newline_offset as u64).saturating_sub(1);
+                        // `trailing_bytes` is the number of bytes after the last newline in the
+                        // matched literal, which is the column on the final line.
+                        let trailing_bytes = self.inner[..self.inner.len() - remaining.len()].as_bytes().iter().rev().position(|x| *x == b'\n').expect("malformed newline state");
+                        self.col = trailing_bytes as u64;
                         self.col
                     },
                 };

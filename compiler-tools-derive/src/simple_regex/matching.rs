@@ -10,43 +10,25 @@ impl SimpleRegex {
                     }
                 }
                 Atom::Group(inverted, entries) => {
-                    if *inverted {
-                        for entry in entries {
-                            match entry {
-                                GroupEntry::Char(c) => {
-                                    if *c == '\n' {
-                                        return false;
-                                    }
-                                }
-                                GroupEntry::Range(start, end) => {
-                                    if *start <= '\n' && *end >= '\n' {
-                                        return false;
-                                    }
-                                }
-                            }
-                        }
+                    let entries_contain_newline = entries.iter().any(|entry| match entry {
+                        GroupEntry::Char(c) => *c == '\n',
+                        GroupEntry::Range(start, end) => *start <= '\n' && *end >= '\n',
+                    });
+                    // A negated class matches '\n' unless it explicitly excludes it; a normal
+                    // class matches '\n' only when it lists it. Either way, a non-capturing
+                    // atom must fall through so a later atom can still capture a newline.
+                    if entries_contain_newline != *inverted {
                         return true;
-                    } else {
-                        for entry in entries {
-                            let matched = match entry {
-                                GroupEntry::Char(c) => *c == '\n',
-                                GroupEntry::Range(start, end) => *start <= '\n' && *end >= '\n',
-                            };
-                            if matched {
-                                return true;
-                            }
-                        }
                     }
                 }
             }
         }
-        return false;
+        false
     }
 
     pub fn matches(&self, from: &str) -> bool {
         let mut state = 0u32;
-        let mut chars = from.chars();
-        while let Some(char) = chars.next() {
+        for char in from.chars() {
             for (transition, target) in self.dfa.transitions.get(&state).unwrap() {
                 if transition.matches(char) {
                     state = *target;
@@ -88,6 +70,10 @@ mod tests {
         assert!(!newline_capture("[^\n]*"));
         // a negated class that does not exclude '\n' can
         assert!(newline_capture("[^a]"));
+        // Regression: a newline-bearing atom *after* a newline-excluding negated class
+        // must still be detected (the scan used to stop at the first negated class).
+        assert!(newline_capture("[^\n]*\n"));
+        assert!(newline_capture("[^\n]*[\n]"));
     }
 
     #[test]
