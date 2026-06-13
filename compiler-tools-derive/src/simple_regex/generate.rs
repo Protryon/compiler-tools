@@ -12,6 +12,7 @@ impl SimpleRegex {
             for (transition, target) in transitions {
                 let match_expr = match transition {
                     nfa::TransitionEvent::Epsilon => unreachable!(),
+                    nfa::TransitionEvent::EndOfInput => quote! { None => ::compiler_tools::MatchResult::MatchedEmpty(#target), },
                     nfa::TransitionEvent::End => quote! { _ => ::compiler_tools::MatchResult::MatchedEmpty(#target), },
                     nfa::TransitionEvent::Char(c) => quote! { Some(#c) => ::compiler_tools::MatchResult::Matched(#target), },
                     nfa::TransitionEvent::Chars(inverted, group) => {

@@ -8,6 +8,8 @@ pub enum TransitionEvent {
     Char(char),
     // (inverted, set)
     Chars(bool, Vec<GroupEntry>),
+    /// Zero-width `$` assertion: only taken when the input is exhausted.
+    EndOfInput,
     End,
 }
 
@@ -33,6 +35,8 @@ impl TransitionEvent {
                 }
                 *inverted
             }
+            // A zero-width assertion never consumes a character.
+            TransitionEvent::EndOfInput => false,
             TransitionEvent::End => true,
         }
     }
@@ -40,6 +44,9 @@ impl TransitionEvent {
     pub fn completely_shadows(&self, other: &TransitionEvent) -> bool {
         match (self, other) {
             (TransitionEvent::Epsilon, _) | (_, TransitionEvent::Epsilon) | (_, TransitionEvent::End) => false,
+            // A `$` assertion is conditioned on EOF rather than a character, so it neither
+            // shadows nor is shadowed by any other edge; keep it independent of `End`.
+            (TransitionEvent::EndOfInput, _) | (_, TransitionEvent::EndOfInput) => false,
             (TransitionEvent::End, _) => true,
             (TransitionEvent::Char(c1), TransitionEvent::Char(c2)) => c1 == c2,
             //TODO: this could be true, investigate
@@ -64,6 +71,7 @@ fn event_from_atom(atom: &Atom) -> Vec<TransitionEvent> {
         Atom::Group(inverted, entries) => {
             vec![TransitionEvent::Chars(*inverted, entries.clone())]
         }
+        Atom::EndOfInput => vec![TransitionEvent::EndOfInput],
     }
 }
 

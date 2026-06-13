@@ -52,7 +52,7 @@ A small regex compiler used by `#[token(regex = ...)]`, producing a branch-only 
 
 `parse.rs` (pattern → AST of literal/group atoms with `* + ?` repeats) → `nfa.rs` (NFA with epsilon closures) → `dfa.rs` (subset construction; `completely_shadows` orders transitions so earlier-declared alternatives keep priority) → `generate.rs` (emits a per-state `match` function returning `MatchResult::{Matched, MatchedEmpty, NoMatch}`).
 
-Supported syntax: literals, `[...]` classes and `a-z` ranges, negation `[^...]`, `.`, and `* + ?`. There is **no alternation or grouping** — use `regex_full` for those.
+Supported syntax: literals, `[...]` classes and `a-z` ranges, negation `[^...]`, `.` (any char except `\n`, like the `regex` crate), the quantifiers `* + ?` and counted `{n} {n,} {n,m}`, control-char escapes (`\n \t \r \0 \f \v`), ASCII Perl shorthand classes (`\d \D \w \W \s \S`), a leading `^` (no-op for a prefix matcher), and a trailing `$` (end-of-input assertion, lowered to `Atom::EndOfInput`/`TransitionEvent::EndOfInput`). There is still **no alternation or grouping** — use `regex_full` for those. `REGEX_PARITY.md` tracks the remaining gaps against the `regex` crate.
 
 ### Span tracking
 

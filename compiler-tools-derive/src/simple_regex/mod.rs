@@ -11,7 +11,7 @@ mod matching;
 mod nfa;
 mod parse;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum Repeat {
     Once,
     ZeroOrOnce,
@@ -26,14 +26,19 @@ pub enum GroupEntry {
     Range(char, char),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Atom {
     Literal(String),
     // (inverted, items)
     Group(bool, Vec<GroupEntry>),
+    /// A zero-width `$` assertion: the match only completes when the input is
+    /// exhausted. There is no start-of-input counterpart because this engine
+    /// always matches a prefix from the current position, so a leading `^` is a
+    /// no-op and is dropped at parse time.
+    EndOfInput,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AtomRepeat {
     pub atom: Atom,
     pub repeat: Repeat,

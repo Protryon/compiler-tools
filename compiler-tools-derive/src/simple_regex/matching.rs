@@ -21,6 +21,8 @@ impl SimpleRegex {
                         return true;
                     }
                 }
+                // A zero-width `$` assertion consumes nothing.
+                Atom::EndOfInput => {}
             }
         }
         false
@@ -57,9 +59,9 @@ mod tests {
     }
 
     #[test]
-    fn could_capture_newline_dot_matches_everything() {
-        // `.` becomes an inverted empty group, which matches any char including '\n'.
-        assert!(newline_capture("."));
+    fn could_capture_newline_dot_excludes_newline() {
+        // `.` is "any char except newline", so it can never capture a '\n'.
+        assert!(!newline_capture("."));
     }
 
     #[test]
@@ -126,12 +128,51 @@ mod tests {
     }
 
     #[test]
-    fn matches_dot_any_char() {
+    fn matches_dot_any_char_except_newline() {
         let re = SimpleRegex::parse("a.c").unwrap();
         assert!(re.matches("abc"));
         assert!(re.matches("a_c"));
-        assert!(re.matches("a\nc"));
+        // `.` does not match a newline.
+        assert!(!re.matches("a\nc"));
         assert!(!re.matches("ac"));
+    }
+
+    #[test]
+    fn matches_shorthand_classes() {
+        let digits = SimpleRegex::parse("\\d+").unwrap();
+        assert!(digits.matches("123"));
+        assert!(!digits.matches("abc"));
+
+        let word = SimpleRegex::parse("\\w+").unwrap();
+        assert!(word.matches("foo_9"));
+
+        let non_digit = SimpleRegex::parse("\\D").unwrap();
+        assert!(non_digit.matches("a"));
+        assert!(!non_digit.matches("5"));
+    }
+
+    #[test]
+    fn matches_control_char_escape() {
+        let re = SimpleRegex::parse("a\\nb").unwrap();
+        assert!(re.matches("a\nb"));
+        assert!(!re.matches("anb"));
+    }
+
+    #[test]
+    fn matches_counted_repetition() {
+        let re = SimpleRegex::parse("a{2,3}b").unwrap();
+        // Fewer than the two mandatory copies never reaches the trailing `b`.
+        assert!(!re.matches("ab"));
+        assert!(re.matches("aab"));
+        assert!(re.matches("aaab"));
+    }
+
+    #[test]
+    fn matches_exact_count() {
+        let re = SimpleRegex::parse("a{3}").unwrap();
+        assert!(re.matches("aaa"));
+        // Only two copies never completes the third mandatory `a`.
+        assert!(!re.matches("aa"));
     }
 
     #[test]
