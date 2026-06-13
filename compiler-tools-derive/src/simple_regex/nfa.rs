@@ -177,10 +177,105 @@ impl Nfa {
 mod tests {
     use super::*;
 
+    fn chars(inverted: bool, entries: &[GroupEntry]) -> TransitionEvent {
+        TransitionEvent::Chars(inverted, entries.to_vec())
+    }
+
     #[test]
-    fn test_nfa() {
-        let regex = SimpleRegexAst::parse("[a-z][a-zA-Z0-9_]*").unwrap();
-        let nfa = Nfa::build(&regex);
-        println!("{:?}", nfa);
+    fn char_event_matches_exact() {
+        assert!(TransitionEvent::Char('a').matches('a'));
+        assert!(!TransitionEvent::Char('a').matches('b'));
+    }
+
+    #[test]
+    fn epsilon_never_matches_and_end_always_matches() {
+        assert!(!TransitionEvent::Epsilon.matches('a'));
+        assert!(TransitionEvent::End.matches('a'));
+        assert!(TransitionEvent::End.matches('\n'));
+    }
+
+    #[test]
+    fn group_event_membership_and_ranges() {
+        let event = chars(false, &[GroupEntry::Range('a', 'z'), GroupEntry::Char('_')]);
+        assert!(event.matches('a'));
+        assert!(event.matches('m'));
+        assert!(event.matches('z'));
+        assert!(event.matches('_'));
+        assert!(!event.matches('A'));
+        assert!(!event.matches('0'));
+    }
+
+    #[test]
+    fn inverted_group_event() {
+        let event = chars(true, &[GroupEntry::Char('a')]);
+        assert!(!event.matches('a'));
+        assert!(event.matches('b'));
+        // An inverted empty group (`.`) matches anything.
+        assert!(chars(true, &[]).matches('x'));
+        assert!(chars(true, &[]).matches('\n'));
+    }
+
+    #[test]
+    fn end_shadows_everything_but_epsilon_and_end() {
+        let end = TransitionEvent::End;
+        assert!(end.completely_shadows(&TransitionEvent::Char('a')));
+        assert!(end.completely_shadows(&chars(false, &[GroupEntry::Char('a')])));
+        assert!(!end.completely_shadows(&TransitionEvent::Epsilon));
+        assert!(!end.completely_shadows(&TransitionEvent::End));
+    }
+
+    #[test]
+    fn char_shadows_equal_char_only() {
+        assert!(TransitionEvent::Char('a').completely_shadows(&TransitionEvent::Char('a')));
+        assert!(!TransitionEvent::Char('a').completely_shadows(&TransitionEvent::Char('b')));
+        // Conservatively, a single char never claims to shadow a class.
+        assert!(!TransitionEvent::Char('a').completely_shadows(&chars(false, &[GroupEntry::Char('a')])));
+    }
+
+    #[test]
+    fn class_shadows_a_char_it_covers() {
+        let lower = chars(false, &[GroupEntry::Range('a', 'z')]);
+        assert!(lower.completely_shadows(&TransitionEvent::Char('m')));
+        assert!(!lower.completely_shadows(&TransitionEvent::Char('A')));
+        // Class-vs-class is conservatively never a shadow.
+        assert!(!lower.completely_shadows(&chars(false, &[GroupEntry::Char('a')])));
+    }
+
+    #[test]
+    fn epsilon_shadows_nothing() {
+        assert!(!TransitionEvent::Epsilon.completely_shadows(&TransitionEvent::Char('a')));
+        assert!(!TransitionEvent::Char('a').completely_shadows(&TransitionEvent::Epsilon));
+    }
+
+    #[test]
+    fn literal_chain_is_a_linear_state_machine() {
+        // "abc" -> states 0->1->2->3 each on one Char, final state 3.
+        let nfa = Nfa::build(&SimpleRegexAst::parse("abc").unwrap());
+        assert_eq!(nfa.final_state, 3);
+        for (i, expected) in ['a', 'b', 'c'].into_iter().enumerate() {
+            let trans = nfa.transitions.get(&(i as u32)).expect("state present");
+            assert_eq!(trans.as_slice(), &[(TransitionEvent::Char(expected), i as u32 + 1)]);
+        }
+    }
+
+    #[test]
+    fn zero_or_more_adds_epsilon_skip_and_loops_back() {
+        // "a*" binds the star to the trailing char; the start state offers an
+        // epsilon to skip and the consuming edge loops back to itself.
+        let nfa = Nfa::build(&SimpleRegexAst::parse("a*").unwrap());
+        let start = nfa.final_state - 1;
+        let trans = nfa.transitions.get(&start).expect("repeat state present");
+        assert!(trans.contains(&(TransitionEvent::Char('a'), start)), "consuming edge loops back: {trans:?}");
+        assert!(
+            trans.iter().any(|(e, t)| matches!(e, TransitionEvent::Epsilon) && *t == nfa.final_state),
+            "epsilon skip to final: {trans:?}"
+        );
+    }
+
+    #[test]
+    fn epsilon_closure_reports_end_at_final_state() {
+        let nfa = Nfa::build(&SimpleRegexAst::parse("a").unwrap());
+        let closure = nfa.epsilon_closure(nfa.final_state);
+        assert_eq!(closure, vec![(TransitionEvent::End, nfa.final_state)]);
     }
 }

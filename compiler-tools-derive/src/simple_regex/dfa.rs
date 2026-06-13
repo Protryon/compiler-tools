@@ -87,21 +87,73 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn test_dfa() {
-        let regex = SimpleRegexAst::parse("/\\*.*\\*/").unwrap();
-        let nfa = Nfa::build(&regex);
-        println!("{:?}", nfa);
-        let dfa = Dfa::build(&nfa);
-        println!("{:?}", dfa);
+    fn build(pattern: &str) -> Dfa {
+        Dfa::build(&Nfa::build(&SimpleRegexAst::parse(pattern).expect("valid pattern")))
+    }
+
+    /// Every state a transition can reach must either be the final state or
+    /// itself have an entry in the transition table; otherwise the generated
+    /// matcher would land on a state with no arms.
+    #[track_caller]
+    fn assert_total(dfa: &Dfa) {
+        assert!(dfa.transitions.contains_key(&0), "start state must be present");
+        for (_, transitions) in &dfa.transitions {
+            for (_, target) in transitions {
+                assert!(
+                    *target == dfa.final_state || dfa.transitions.contains_key(target),
+                    "state {target} is reachable but has no transition entry",
+                );
+            }
+        }
+    }
+
+    /// A DFA state must not have two arms keyed on the same exact char, or the
+    /// generated `match` would be ambiguous / unreachable.
+    #[track_caller]
+    fn assert_deterministic_chars(dfa: &Dfa) {
+        for (state, transitions) in &dfa.transitions {
+            let mut seen = HashSet::new();
+            for (event, _) in transitions {
+                if let TransitionEvent::Char(c) = event {
+                    assert!(seen.insert(*c), "state {state} has duplicate char arm for {c:?}");
+                }
+            }
+        }
     }
 
     #[test]
-    fn test_dfa_ident() {
-        let regex = SimpleRegexAst::parse("[a-z][a-zA-Z0-9_]*").unwrap();
-        let nfa = Nfa::build(&regex);
-        println!("{:?}", nfa);
+    fn final_state_is_carried_from_nfa() {
+        let nfa = Nfa::build(&SimpleRegexAst::parse("[a-z][a-zA-Z0-9_]*").unwrap());
         let dfa = Dfa::build(&nfa);
-        println!("{:?}", dfa);
+        assert_eq!(dfa.final_state, nfa.final_state);
+    }
+
+    #[test]
+    fn ident_dfa_is_total_and_deterministic() {
+        let dfa = build("[a-z][a-zA-Z0-9_]*");
+        assert_total(&dfa);
+        assert_deterministic_chars(&dfa);
+    }
+
+    #[test]
+    fn block_comment_dfa_is_total_and_deterministic() {
+        // `/\*.*\*/` mixes literals, `.`, and a star — the trickiest construction.
+        let dfa = build("/\\*.*\\*/");
+        assert_total(&dfa);
+        assert_deterministic_chars(&dfa);
+    }
+
+    #[test]
+    fn overlapping_class_and_exit_char_stays_total_and_deterministic() {
+        // In `[a-z]*x` the start state can both loop on the `[a-z]` class and
+        // exit on the literal `x`, which the class covers. `completely_shadows`
+        // resolves the overlap during subset construction; the result must still
+        // be a valid, total DFA with no duplicate single-char arm.
+        let dfa = build("[a-z]*x");
+        assert_total(&dfa);
+        assert_deterministic_chars(&dfa);
+        let start = dfa.transitions.get(&0).expect("start state");
+        assert!(start.iter().any(|(e, _)| matches!(e, TransitionEvent::Char('x'))), "exit edge present: {start:?}");
+        assert!(start.iter().any(|(e, _)| matches!(e, TransitionEvent::Chars(false, _))), "loop class edge present: {start:?}");
     }
 }

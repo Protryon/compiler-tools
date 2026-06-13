@@ -110,4 +110,64 @@ mod tests {
         assert!(re.matches("foo_bar"));
         assert!(!re.matches("123"));
     }
+
+    #[test]
+    fn matches_exact_literal() {
+        let re = SimpleRegex::parse("let").unwrap();
+        assert!(re.matches("let"));
+        // `matches` reports a prefix match, as used for keyword/identifier
+        // conflict detection.
+        assert!(re.matches("lets"));
+        // An input that never completes the literal does not match.
+        assert!(!re.matches("le"));
+        assert!(!re.matches("abc"));
+    }
+
+    #[test]
+    fn matches_escaped_metachar_literally() {
+        let re = SimpleRegex::parse("a\\*b").unwrap();
+        assert!(re.matches("a*b"));
+        assert!(!re.matches("aaab"));
+    }
+
+    #[test]
+    fn matches_optional_atom() {
+        let re = SimpleRegex::parse("ab?c").unwrap();
+        assert!(re.matches("abc"));
+        assert!(re.matches("ac"));
+        // The trailing `c` is required, so an input that never reaches it fails.
+        assert!(!re.matches("ab"));
+    }
+
+    #[test]
+    fn matches_dot_any_char() {
+        let re = SimpleRegex::parse("a.c").unwrap();
+        assert!(re.matches("abc"));
+        assert!(re.matches("a_c"));
+        assert!(re.matches("a\nc"));
+        assert!(!re.matches("ac"));
+    }
+
+    #[test]
+    fn matches_inverted_class() {
+        let re = SimpleRegex::parse("[^0-9]+").unwrap();
+        assert!(re.matches("abc"));
+        assert!(!re.matches("123"));
+    }
+
+    #[test]
+    fn matches_leading_star_run() {
+        // A char immediately followed by `*` (no prefix) still matches greedily.
+        let re = SimpleRegex::parse("a*b").unwrap();
+        assert!(re.matches("aaab"));
+        assert!(re.matches("b"));
+        assert!(!re.matches("c"));
+    }
+
+    #[test]
+    fn matches_unicode_chars() {
+        let re = SimpleRegex::parse("[α-ω]+").unwrap();
+        assert!(re.matches("λαμβδα"));
+        assert!(!re.matches("abc"));
+    }
 }
