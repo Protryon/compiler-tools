@@ -1,69 +1,111 @@
 use super::*;
 
+/// Whether any atom in a sequence could consume a `\n`. Recurses into alternation
+/// branches so a newline inside a group (`(a\n|b)`) is still detected, picking the
+/// newline-counting span path at compile time.
+fn atoms_could_capture_newline(atoms: &[AtomRepeat]) -> bool {
+    atoms.iter().any(|atom| match &atom.atom {
+        Atom::Literal(lit) => lit.contains('\n'),
+        Atom::Group(inverted, entries) => {
+            let entries_contain_newline = entries.iter().any(|entry| match entry {
+                GroupEntry::Char(c) => *c == '\n',
+                GroupEntry::Range(start, end) => *start <= '\n' && *end >= '\n',
+            });
+            // A negated class matches '\n' unless it explicitly excludes it; a normal
+            // class matches '\n' only when it lists it.
+            entries_contain_newline != *inverted
+        }
+        // Zero-width assertions consume nothing.
+        Atom::EndOfInput | Atom::WordBoundary(_) => false,
+        Atom::Alternation(branches) => branches.iter().any(|branch| atoms_could_capture_newline(branch)),
+    })
+}
+
 impl SimpleRegex {
     pub fn could_capture_newline(&self) -> bool {
-        for atom in &self.ast.atoms {
-            match &atom.atom {
-                Atom::Literal(lit) => {
-                    if lit.contains('\n') {
-                        return true;
-                    }
-                }
-                Atom::Group(inverted, entries) => {
-                    let entries_contain_newline = entries.iter().any(|entry| match entry {
-                        GroupEntry::Char(c) => *c == '\n',
-                        GroupEntry::Range(start, end) => *start <= '\n' && *end >= '\n',
-                    });
-                    // A negated class matches '\n' unless it explicitly excludes it; a normal
-                    // class matches '\n' only when it lists it. Either way, a non-capturing
-                    // atom must fall through so a later atom can still capture a newline.
-                    if entries_contain_newline != *inverted {
-                        return true;
-                    }
-                }
-                // Zero-width assertions consume nothing.
-                Atom::EndOfInput | Atom::WordBoundary(_) => {}
+        atoms_could_capture_newline(&self.ast.atoms)
+    }
+
+    /// Whether the regex matches some prefix of `from`. Used at macro-expansion
+    /// time for keyword/identifier conflict detection, so it answers an unanchored
+    /// "is there an accepting prefix" question rather than returning the span.
+    ///
+    /// Because the DFA is now a real (deterministic) subset construction, each
+    /// character advances to at most one state, and a prefix matches whenever any
+    /// state visited along the way is accepting — i.e. it is the sink `final_state`
+    /// or it carries an `End` edge (an "accept here, but you may also keep going"
+    /// state, which alternation and `*`/`?` produce). Zero-width assertions are not
+    /// consulted here, matching the historical behaviour of this check.
+    pub fn matches(&self, from: &str) -> bool {
+        use super::nfa::TransitionEvent;
+        let mut state = 0u32;
+        if self.accepts(state) {
+            return true;
+        }
+        for ch in from.chars() {
+            let Some(transitions) = self.dfa.transitions.get(&state) else {
+                return false;
+            };
+            let next = transitions
+                .iter()
+                .find(|(transition, _)| matches!(transition, TransitionEvent::Char(_) | TransitionEvent::Chars(..)) && transition.matches(ch));
+            match next {
+                Some((_, target)) => state = *target,
+                None => return false,
+            }
+            if self.accepts(state) {
+                return true;
             }
         }
         false
     }
 
-    pub fn matches(&self, from: &str) -> bool {
-        let mut state = 0u32;
-        for char in from.chars() {
-            for (transition, target) in self.dfa.transitions.get(&state).unwrap() {
-                if transition.matches(char) {
-                    state = *target;
-                    if state == self.dfa.final_state {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+    /// Whether `state` is accepting: the transition-less sink, or any state with an
+    /// `End` edge to it.
+    fn accepts(&self, state: u32) -> bool {
+        use super::nfa::TransitionEvent;
+        state == self.dfa.final_state
+            || self
+                .dfa
+                .transitions
+                .get(&state)
+                .is_some_and(|transitions| transitions.iter().any(|(transition, _)| matches!(transition, TransitionEvent::End)))
     }
 
     /// Run the DFA as a runtime interpreter, returning the matched prefix and the
     /// remaining input — the same `(matched, remaining)` contract the generated
     /// (`generate_parser`) matcher produces.
     ///
-    /// This deliberately mirrors the generated code's per-state evaluation so the
-    /// "runtime interpreter" and "compiled" engines stay in lock-step: consuming
-    /// edges win over zero-width ones, `$`/`\z` only fires at end of input, an NFA
-    /// `End` edge accepts unconditionally, and word boundaries are checked against
-    /// the previous and lookahead chars without consuming. The match is anchored at
-    /// the start of `from` (a prefix match); callers do unanchored searches by
-    /// advancing the start position themselves.
+    /// This is a leftmost-longest match: it consumes greedily, remembers the byte
+    /// position of the last accepting state seen, and on a dead end (or end of
+    /// input) returns the match up to that remembered position. That last-accept
+    /// backoff is what lets `.*` and alternation pick the longest overall match
+    /// rather than committing to a branch that later fails — e.g. `/\*.*\*/` on
+    /// `/*a*/+` returns `/*a*/` instead of running off the end.
+    ///
+    /// It mirrors the generated matcher exactly so the two engines stay in
+    /// lock-step: consuming edges win over zero-width ones; `$`/`\z` only fires at
+    /// end of input; word boundaries are tested against `prev`/`c` without
+    /// consuming; and an `End` edge marks a state accepting (it never moves). The
+    /// match is anchored at the start of `from`; callers search by advancing the
+    /// start position themselves.
     #[allow(dead_code)] // exercised by the conformance unit tests, not the macro itself
     pub fn find_prefix<'a>(&self, from: &'a str) -> Option<(&'a str, &'a str)> {
         let mut counter = 0usize;
         let mut state = 0u32;
+        let mut last: Option<usize> = None;
         let mut prev: Option<char> = None;
         let mut chars = from.chars();
         let mut c = chars.next();
+        // A bound on consecutive zero-width moves; more than one per state would
+        // mean a zero-width cycle (e.g. `\b*`), so this can never truncate a real match.
+        let zero_width_limit = self.dfa.transitions.len() + 1;
+        let mut zero_width = 0usize;
         loop {
-            // The final state has no transition entry; any other missing state is a dead end.
-            let transitions = self.dfa.transitions.get(&state)?;
+            if self.accepts(state) {
+                last = Some(counter);
+            }
+            let Some(transitions) = self.dfa.transitions.get(&state) else { break };
             match eval_state(transitions, prev, c) {
                 Step::Matched(next) => {
                     state = next;
@@ -72,20 +114,20 @@ impl SimpleRegex {
                     }
                     prev = c;
                     c = chars.next();
-                    if next == self.dfa.final_state {
-                        return Some((&from[..counter], &from[counter..]));
-                    }
+                    zero_width = 0;
                 }
                 Step::MatchedEmpty(next) => {
                     // Zero-width transition: keep the lookahead char and byte position.
                     state = next;
-                    if next == self.dfa.final_state {
-                        return Some((&from[..counter], &from[counter..]));
+                    zero_width += 1;
+                    if zero_width > zero_width_limit {
+                        break;
                     }
                 }
-                Step::NoMatch => return None,
+                Step::NoMatch => break,
             }
         }
+        last.map(|n| (&from[..n], &from[n..]))
     }
 }
 
@@ -102,9 +144,9 @@ fn is_word(ch: Option<char>) -> bool {
 }
 
 /// Evaluate one DFA state for the runtime interpreter, matching the priority the
-/// generated matcher uses: consuming edges (in declaration order) first, then a
-/// fallback where an `End` edge accepts unconditionally and word boundaries are
-/// tested against `prev`/`c`.
+/// generated matcher uses: consuming edges (in declaration order) first, then the
+/// zero-width moves — `$`/`\z` at end of input and word boundaries tested against
+/// `prev`/`c`. `End` edges are *not* moves; acceptance is handled by `accepts`.
 #[allow(dead_code)]
 fn eval_state(transitions: &[(super::nfa::TransitionEvent, u32)], prev: Option<char>, c: Option<char>) -> Step {
     use super::nfa::TransitionEvent;
@@ -132,13 +174,6 @@ fn eval_state(transitions: &[(super::nfa::TransitionEvent, u32)], prev: Option<c
                 }
             }
             _ => {}
-        }
-    }
-    // Fallback: an `End` edge (if present) accepts unconditionally and outranks
-    // any word boundary, matching `generate_parser`'s fallback arm.
-    for (transition, target) in transitions {
-        if let TransitionEvent::End = transition {
-            return Step::MatchedEmpty(*target);
         }
     }
     for (transition, target) in transitions {
@@ -304,5 +339,121 @@ mod tests {
         let re = SimpleRegex::parse("[α-ω]+").unwrap();
         assert!(re.matches("λαμβδα"));
         assert!(!re.matches("abc"));
+    }
+
+    #[test]
+    fn matches_top_level_alternation() {
+        let re = SimpleRegex::parse("abc|def").unwrap();
+        assert!(re.matches("abc"));
+        assert!(re.matches("def"));
+        assert!(!re.matches("abx"));
+        assert!(!re.matches("xyz"));
+    }
+
+    #[test]
+    fn matches_grouped_alternation() {
+        // The group bounds the alternation: `foo` or `bar`, then a mandatory `!`.
+        let re = SimpleRegex::parse("(foo|bar)!").unwrap();
+        assert!(re.matches("foo!"));
+        assert!(re.matches("bar!"));
+        // Without the group, `|` would split into `(foo)` and `(bar!)`.
+        assert!(!re.matches("foo"));
+        assert!(!re.matches("bar"));
+        assert!(!re.matches("baz!"));
+    }
+
+    #[test]
+    fn matches_quantified_group() {
+        // `(ab)+` — one or more repetitions of the whole group.
+        let re = SimpleRegex::parse("(ab)+").unwrap();
+        assert!(re.matches("ab"));
+        assert!(re.matches("abab"));
+        assert!(re.matches("ababab"));
+        assert!(!re.matches("a"));
+        assert!(!re.matches("ba"));
+
+        // `(ab)*c` — zero or more, then a required `c`.
+        let re = SimpleRegex::parse("(ab)*c").unwrap();
+        assert!(re.matches("c"));
+        assert!(re.matches("abc"));
+        assert!(re.matches("ababc"));
+        assert!(!re.matches("ab"));
+    }
+
+    #[test]
+    fn matches_optional_group() {
+        let re = SimpleRegex::parse("a(bc)?d").unwrap();
+        assert!(re.matches("ad"));
+        assert!(re.matches("abcd"));
+        assert!(!re.matches("abd"));
+    }
+
+    #[test]
+    fn matches_nested_groups() {
+        // `(a(b|c)d)+` — alternation nested inside a quantified group.
+        let re = SimpleRegex::parse("(a(b|c)d)+").unwrap();
+        assert!(re.matches("abd"));
+        assert!(re.matches("acd"));
+        assert!(re.matches("abdacd"));
+        assert!(!re.matches("ad"));
+        // `matches` is a prefix check, so trailing junk is fine (`abd` matches), but
+        // a non-`a` start has no matching prefix at all.
+        assert!(re.matches("abd_"));
+        assert!(!re.matches("xbd"));
+    }
+
+    #[test]
+    fn matches_empty_alternation_branch() {
+        // `a(b|)c` — the second branch is empty, so `bc` is optional just like `ab?c`.
+        let re = SimpleRegex::parse("a(b|)c").unwrap();
+        assert!(re.matches("abc"));
+        assert!(re.matches("ac"));
+        assert!(!re.matches("axc"));
+    }
+
+    #[test]
+    fn non_capturing_and_named_groups_behave_like_groups() {
+        for pattern in ["(?:foo|bar)!", "(?P<word>foo|bar)!", "(?<word>foo|bar)!"] {
+            let re = SimpleRegex::parse(pattern).unwrap_or_else(|| panic!("parse {pattern}"));
+            assert!(re.matches("foo!"), "{pattern} should match foo!");
+            assert!(re.matches("bar!"), "{pattern} should match bar!");
+            assert!(!re.matches("baz!"), "{pattern} should not match baz!");
+        }
+    }
+
+    #[test]
+    fn alternation_prefers_the_longer_match() {
+        // This engine is greedy/leftmost-longest: a consuming edge always outranks
+        // accepting, so `a|ab` takes `ab` when both branches are viable. (This
+        // differs from the `regex` crate's leftmost-first `a` — see REGEX_PARITY.)
+        let re = SimpleRegex::parse("a|ab").unwrap();
+        assert_eq!(re.find_prefix("ab"), Some(("ab", "")));
+        // When only the short branch can complete, that one wins.
+        assert_eq!(re.find_prefix("ac"), Some(("a", "c")));
+    }
+
+    #[test]
+    fn group_with_alternation_finds_longest_required_suffix() {
+        // The trailing `z` forces the longer branch when the short one can't complete.
+        let re = SimpleRegex::parse("(a|ab)z").unwrap();
+        assert_eq!(re.find_prefix("abz"), Some(("abz", "")));
+        assert_eq!(re.find_prefix("az"), Some(("az", "")));
+    }
+
+    #[test]
+    fn unsupported_or_malformed_group_syntax_is_rejected() {
+        // Unclosed group, stray close, lookaround and inline flags are rejected.
+        assert!(SimpleRegex::parse("(abc").is_none());
+        assert!(SimpleRegex::parse("abc)").is_none());
+        assert!(SimpleRegex::parse("(?=foo)").is_none());
+        assert!(SimpleRegex::parse("(?<=foo)bar").is_none());
+        assert!(SimpleRegex::parse("(?i)foo").is_none());
+    }
+
+    #[test]
+    fn escaped_parens_and_pipe_stay_literal() {
+        let re = SimpleRegex::parse("\\(a\\|b\\)").unwrap();
+        assert!(re.matches("(a|b)"));
+        assert!(!re.matches("a"));
     }
 }

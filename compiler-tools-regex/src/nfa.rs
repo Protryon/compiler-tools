@@ -1,6 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-use super::{Atom, GroupEntry, Repeat, SimpleRegexAst};
+use super::{Atom, AtomRepeat, GroupEntry, Repeat, SimpleRegexAst};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TransitionEvent {
@@ -42,22 +42,6 @@ impl TransitionEvent {
             TransitionEvent::End => true,
         }
     }
-
-    pub fn completely_shadows(&self, other: &TransitionEvent) -> bool {
-        match (self, other) {
-            (TransitionEvent::Epsilon, _) | (_, TransitionEvent::Epsilon) | (_, TransitionEvent::End) => false,
-            // Zero-width assertions (`$`, `\b`, `\B`) are conditioned on position rather than
-            // a consumed character, so they neither shadow nor are shadowed by any other edge.
-            (TransitionEvent::EndOfInput | TransitionEvent::WordBoundary(_), _) | (_, TransitionEvent::EndOfInput | TransitionEvent::WordBoundary(_)) => false,
-            (TransitionEvent::End, _) => true,
-            (TransitionEvent::Char(c1), TransitionEvent::Char(c2)) => c1 == c2,
-            //TODO: this could be true, investigate
-            (TransitionEvent::Char(_), TransitionEvent::Chars(_, _)) => false,
-            (e1, TransitionEvent::Char(c2)) => e1.matches(*c2),
-            //TODO: this could be true, investigate
-            (TransitionEvent::Chars(_, _), TransitionEvent::Chars(_, _)) => false,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -67,120 +51,126 @@ pub struct Nfa {
     pub final_state: u32,
 }
 
-fn event_from_atom(atom: &Atom) -> Vec<TransitionEvent> {
-    match atom {
-        Atom::Literal(l) => l.chars().map(TransitionEvent::Char).collect(),
-        Atom::Group(inverted, entries) => {
-            vec![TransitionEvent::Chars(*inverted, entries.clone())]
+/// Thompson-style NFA construction. Builds the machine recursively as a set of
+/// fragments wired together with epsilon transitions, which is what lets nested
+/// groups and alternation (`(a|bc)*`) compose; the per-call epsilons are erased
+/// again by the subset construction in `dfa.rs`.
+///
+/// Every fragment is built between an existing `start` state and a freshly
+/// allocated `end` state that the builder returns, so a sequence chains by
+/// feeding one fragment's end in as the next fragment's start. Consuming edges
+/// are pushed onto `start` before any skip/loop epsilon, which keeps greedy
+/// quantifiers and earlier alternation branches first in declaration order — the
+/// subset construction in `dfa.rs` then makes the machine deterministic.
+struct Builder {
+    transitions: BTreeMap<u32, Vec<(TransitionEvent, u32)>>,
+    next: u32,
+}
+
+impl Builder {
+    fn new_state(&mut self) -> u32 {
+        let state = self.next;
+        self.next += 1;
+        // Ensure every allocated state has an entry, so `epsilon_closure`'s
+        // `.expect("invalid state")` can never fire on a reachable state.
+        self.transitions.entry(state).or_default();
+        state
+    }
+
+    fn edge(&mut self, from: u32, event: TransitionEvent, to: u32) {
+        self.transitions.entry(from).or_default().push((event, to));
+    }
+
+    /// Build a `|`-free sequence of atoms, returning the fragment's end state.
+    fn build_sequence(&mut self, atoms: &[AtomRepeat], start: u32) -> u32 {
+        let mut current = start;
+        for atom in atoms {
+            current = self.build_repeat(atom, current);
         }
-        Atom::EndOfInput => vec![TransitionEvent::EndOfInput],
-        Atom::WordBoundary(negate) => vec![TransitionEvent::WordBoundary(*negate)],
+        current
+    }
+
+    fn build_repeat(&mut self, atom: &AtomRepeat, start: u32) -> u32 {
+        match atom.repeat {
+            Repeat::Once => self.build_atom(&atom.atom, start),
+            Repeat::ZeroOrOnce => {
+                // Consuming body first, then a skip epsilon (greedy: prefer to match).
+                let end = self.build_atom(&atom.atom, start);
+                self.edge(start, TransitionEvent::Epsilon, end);
+                end
+            }
+            Repeat::ZeroOrMore => {
+                let body_end = self.build_atom(&atom.atom, start);
+                self.edge(body_end, TransitionEvent::Epsilon, start);
+                let end = self.new_state();
+                self.edge(start, TransitionEvent::Epsilon, end);
+                end
+            }
+            Repeat::OnceOrMore => {
+                let body_end = self.build_atom(&atom.atom, start);
+                let end = self.new_state();
+                // From the body's end, prefer looping back (consume more) over exiting.
+                self.edge(body_end, TransitionEvent::Epsilon, start);
+                self.edge(body_end, TransitionEvent::Epsilon, end);
+                end
+            }
+        }
+    }
+
+    fn build_atom(&mut self, atom: &Atom, start: u32) -> u32 {
+        match atom {
+            Atom::Literal(literal) => {
+                let mut current = start;
+                for c in literal.chars() {
+                    let next = self.new_state();
+                    self.edge(current, TransitionEvent::Char(c), next);
+                    current = next;
+                }
+                current
+            }
+            Atom::Group(inverted, entries) => {
+                let end = self.new_state();
+                self.edge(start, TransitionEvent::Chars(*inverted, entries.clone()), end);
+                end
+            }
+            Atom::EndOfInput => {
+                let end = self.new_state();
+                self.edge(start, TransitionEvent::EndOfInput, end);
+                end
+            }
+            Atom::WordBoundary(negate) => {
+                let end = self.new_state();
+                self.edge(start, TransitionEvent::WordBoundary(*negate), end);
+                end
+            }
+            Atom::Alternation(branches) => {
+                // Every branch leaves from the shared `start` (so its leading edges
+                // sit on `start` in declaration order) and merges into one `end`.
+                let end = self.new_state();
+                for branch in branches {
+                    let branch_end = self.build_sequence(branch, start);
+                    self.edge(branch_end, TransitionEvent::Epsilon, end);
+                }
+                end
+            }
+        }
     }
 }
 
 impl Nfa {
-    pub fn epsilon_closure(&self, state: u32) -> Vec<(TransitionEvent, u32)> {
-        let mut output: Vec<(TransitionEvent, u32)> = vec![];
-        let mut stack = vec![state];
-        let mut observed = BTreeSet::new();
-        while let Some(state) = stack.pop() {
-            if state == self.final_state {
-                output.push((TransitionEvent::End, state));
-                continue;
-            }
-            let transitions = self.transitions.get(&state).expect("invalid state");
-            for (event, target) in transitions {
-                if observed.contains(&(event, target)) {
-                    continue;
-                }
-                observed.insert((event, target));
-
-                match event {
-                    TransitionEvent::Epsilon => stack.push(*target),
-                    transition => {
-                        output.push((transition.clone(), *target));
-                    }
-                }
-            }
-        }
-        output
-    }
-
     pub fn build(from: &SimpleRegexAst) -> Self {
-        let mut self_ = Self {
+        let mut builder = Builder {
             transitions: Default::default(),
-            final_state: 0,
+            next: 0,
         };
-
-        let mut current_state = 0u32;
-        for atom in &from.atoms {
-            let mut events = event_from_atom(&atom.atom);
-
-            match atom.repeat {
-                Repeat::Once => {
-                    for event in events {
-                        self_.transitions.insert(current_state, vec![(event, current_state + 1)]);
-                        current_state += 1;
-                    }
-                }
-                Repeat::ZeroOrOnce => {
-                    let first_event = events.remove(0);
-                    self_.transitions.insert(
-                        current_state,
-                        vec![
-                            (first_event, current_state + 1),
-                            (TransitionEvent::Epsilon, current_state + events.len() as u32 + 1),
-                        ],
-                    );
-                    current_state += 1;
-
-                    for event in events {
-                        self_.transitions.insert(current_state, vec![(event, current_state + 1)]);
-                        current_state += 1;
-                    }
-                }
-                Repeat::OnceOrMore => {
-                    for event in events.iter().cloned() {
-                        self_.transitions.insert(current_state, vec![(event, current_state + 1)]);
-                        current_state += 1;
-                    }
-
-                    let first_event = events.remove(0);
-                    let initialization = current_state;
-                    let next_state = if events.is_empty() { initialization } else { current_state + 1 };
-                    self_
-                        .transitions
-                        .insert(current_state, vec![(first_event, next_state), (TransitionEvent::Epsilon, current_state + events.len() as u32 + 1)]);
-                    current_state += 1;
-
-                    let len = events.len();
-                    for (i, event) in events.into_iter().enumerate() {
-                        let next_state = if i + 1 == len { initialization } else { current_state + 1 };
-                        self_.transitions.insert(current_state, vec![(event, next_state)]);
-                        current_state += 1;
-                    }
-                }
-                Repeat::ZeroOrMore => {
-                    let first_event = events.remove(0);
-                    let initialization = current_state;
-                    let next_state = if events.is_empty() { initialization } else { current_state + 1 };
-                    self_
-                        .transitions
-                        .insert(current_state, vec![(first_event, next_state), (TransitionEvent::Epsilon, current_state + events.len() as u32 + 1)]);
-                    current_state += 1;
-
-                    let len = events.len();
-                    for (i, event) in events.into_iter().enumerate() {
-                        let next_state = if i + 1 == len { initialization } else { current_state + 1 };
-                        self_.transitions.insert(current_state, vec![(event, next_state)]);
-                        current_state += 1;
-                    }
-                }
-            }
+        // State 0 is the start; the whole pattern is one sequence fragment, whose
+        // end state becomes the single accepting state.
+        let start = builder.new_state();
+        let final_state = builder.build_sequence(&from.atoms, start);
+        Self {
+            transitions: builder.transitions,
+            final_state,
         }
-        self_.final_state = current_state;
-
-        self_
     }
 }
 
@@ -227,38 +217,6 @@ mod tests {
     }
 
     #[test]
-    fn end_shadows_everything_but_epsilon_and_end() {
-        let end = TransitionEvent::End;
-        assert!(end.completely_shadows(&TransitionEvent::Char('a')));
-        assert!(end.completely_shadows(&chars(false, &[GroupEntry::Char('a')])));
-        assert!(!end.completely_shadows(&TransitionEvent::Epsilon));
-        assert!(!end.completely_shadows(&TransitionEvent::End));
-    }
-
-    #[test]
-    fn char_shadows_equal_char_only() {
-        assert!(TransitionEvent::Char('a').completely_shadows(&TransitionEvent::Char('a')));
-        assert!(!TransitionEvent::Char('a').completely_shadows(&TransitionEvent::Char('b')));
-        // Conservatively, a single char never claims to shadow a class.
-        assert!(!TransitionEvent::Char('a').completely_shadows(&chars(false, &[GroupEntry::Char('a')])));
-    }
-
-    #[test]
-    fn class_shadows_a_char_it_covers() {
-        let lower = chars(false, &[GroupEntry::Range('a', 'z')]);
-        assert!(lower.completely_shadows(&TransitionEvent::Char('m')));
-        assert!(!lower.completely_shadows(&TransitionEvent::Char('A')));
-        // Class-vs-class is conservatively never a shadow.
-        assert!(!lower.completely_shadows(&chars(false, &[GroupEntry::Char('a')])));
-    }
-
-    #[test]
-    fn epsilon_shadows_nothing() {
-        assert!(!TransitionEvent::Epsilon.completely_shadows(&TransitionEvent::Char('a')));
-        assert!(!TransitionEvent::Char('a').completely_shadows(&TransitionEvent::Epsilon));
-    }
-
-    #[test]
     fn literal_chain_is_a_linear_state_machine() {
         // "abc" -> states 0->1->2->3 each on one Char, final state 3.
         let nfa = Nfa::build(&SimpleRegexAst::parse("abc").unwrap());
@@ -271,22 +229,20 @@ mod tests {
 
     #[test]
     fn zero_or_more_adds_epsilon_skip_and_loops_back() {
-        // "a*" binds the star to the trailing char; the start state offers an
-        // epsilon to skip and the consuming edge loops back to itself.
+        // "a*" binds the star to the trailing char. The Thompson fragment has the
+        // start state offer the consuming body edge plus an epsilon skip to the
+        // final state, and the body's end loops back to the start via epsilon.
         let nfa = Nfa::build(&SimpleRegexAst::parse("a*").unwrap());
-        let start = nfa.final_state - 1;
-        let trans = nfa.transitions.get(&start).expect("repeat state present");
-        assert!(trans.contains(&(TransitionEvent::Char('a'), start)), "consuming edge loops back: {trans:?}");
+        let start = nfa.transitions.get(&0).expect("start state present");
+        let (_, body) = start
+            .iter()
+            .find(|(e, _)| matches!(e, TransitionEvent::Char('a')))
+            .expect("consuming body edge present");
         assert!(
-            trans.iter().any(|(e, t)| matches!(e, TransitionEvent::Epsilon) && *t == nfa.final_state),
-            "epsilon skip to final: {trans:?}"
+            start.iter().any(|(e, t)| matches!(e, TransitionEvent::Epsilon) && *t == nfa.final_state),
+            "epsilon skip to final: {start:?}"
         );
-    }
-
-    #[test]
-    fn epsilon_closure_reports_end_at_final_state() {
-        let nfa = Nfa::build(&SimpleRegexAst::parse("a").unwrap());
-        let closure = nfa.epsilon_closure(nfa.final_state);
-        assert_eq!(closure, vec![(TransitionEvent::End, nfa.final_state)]);
+        let body_trans = nfa.transitions.get(body).expect("body state present");
+        assert!(body_trans.contains(&(TransitionEvent::Epsilon, 0)), "body loops back to start via epsilon: {body_trans:?}");
     }
 }

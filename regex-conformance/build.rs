@@ -7,7 +7,10 @@
 //! by the test's full name. Patterns the engine can't parse (alternation, etc.)
 //! are simply absent from the table and skipped by the test.
 
-use std::{env, fs, path::{Path, PathBuf}};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use compiler_tools_regex::{SimpleRegex, flatten};
 use quote::{format_ident, quote};

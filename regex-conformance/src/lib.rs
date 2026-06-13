@@ -86,7 +86,13 @@ pub fn run_search(matcher: impl Fn(&str) -> Option<(&str, &str)>, test: &RegexTe
         match matcher(&haystack[pos..end]) {
             Some((matched, _)) => {
                 let match_end = pos + matched.len();
-                matches.push(Match { id: 0, span: Span { start: pos, end: match_end } });
+                matches.push(Match {
+                    id: 0,
+                    span: Span {
+                        start: pos,
+                        end: match_end,
+                    },
+                });
                 if limit.is_some_and(|limit| matches.len() >= limit) {
                     break;
                 }

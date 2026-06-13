@@ -57,6 +57,13 @@ pub enum Atom {
     /// characters differ (`\b`) or match (`\B`); the edges of the input count as
     /// non-word. Consumes nothing.
     WordBoundary(bool),
+    /// A parenthesised sub-expression with alternation: `(a|bc|d)`. Each inner
+    /// `Vec<AtomRepeat>` is one `|`-separated branch (a sequence of atoms); a plain
+    /// group `(...)` is just an alternation with a single branch. Capturing,
+    /// non-capturing (`(?:...)`) and named (`(?P<n>...)`/`(?<n>...)`) groups are all
+    /// represented identically — this engine does not extract capture spans, so the
+    /// distinction is irrelevant once parsed.
+    Alternation(Vec<Vec<AtomRepeat>>),
 }
 
 #[derive(Debug, Clone)]

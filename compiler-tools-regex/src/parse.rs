@@ -138,7 +138,7 @@ fn extract_bindable(atoms: &mut Vec<AtomRepeat>) -> Option<Atom> {
             }
             Some(Atom::Literal(c.to_string()))
         }
-        Atom::Group(..) => Some(atoms.pop().unwrap().atom),
+        Atom::Group(..) | Atom::Alternation(..) => Some(atoms.pop().unwrap().atom),
         Atom::EndOfInput | Atom::WordBoundary(_) => None,
     }
 }
@@ -238,141 +238,228 @@ fn parse_group(iter: &mut impl Iterator<Item = char>) -> Option<Atom> {
     Some(Atom::Group(inverted, group_entries))
 }
 
-impl SimpleRegexAst {
-    pub fn parse(from: &str) -> Option<SimpleRegexAst> {
-        let mut iter = from.chars();
-        let mut atoms = vec![];
-        let mut escaped = false;
-        let push_lit = |atoms: &mut Vec<AtomRepeat>, c: char| {
-            if let Some(AtomRepeat {
-                atom: Atom::Literal(literal),
-                repeat: Repeat::Once,
-            }) = atoms.last_mut()
-            {
-                literal.push(c);
-            } else {
+/// Appends `c` as a literal char, coalescing it onto a trailing unquantified
+/// literal run so `abc` stays a single `Atom::Literal`.
+fn push_lit(atoms: &mut Vec<AtomRepeat>, c: char) {
+    if let Some(AtomRepeat {
+        atom: Atom::Literal(literal),
+        repeat: Repeat::Once,
+    }) = atoms.last_mut()
+    {
+        literal.push(c);
+    } else {
+        atoms.push(AtomRepeat {
+            atom: Atom::Literal(c.to_string()),
+            repeat: Repeat::Once,
+        });
+    }
+}
+
+/// Consumes the group-modifier prefix immediately after a `(`, if any, leaving
+/// `iter` positioned at the start of the group body. Returns `None` for an
+/// unsupported `(?...)` construct (inline flags, lookaround) so the whole pattern
+/// is rejected rather than silently mis-parsed.
+///
+/// Capturing `(...)`, non-capturing `(?:...)` and named `(?P<name>...)` /
+/// `(?<name>...)` groups are all treated identically — this engine never extracts
+/// capture spans, so the name and capturing-ness are simply skipped.
+fn consume_group_prefix(iter: &mut std::str::Chars) -> Option<()> {
+    if iter.clone().next() != Some('?') {
+        return Some(());
+    }
+    iter.next(); // the '?'
+    match iter.next()? {
+        // Non-capturing group: nothing more to skip.
+        ':' => Some(()),
+        // Python-style named group `(?P<name>...)`.
+        'P' => {
+            if iter.next()? != '<' {
+                return None;
+            }
+            skip_until_gt(iter)
+        }
+        // `(?<name>...)`; reject lookbehind `(?<=...)` / `(?<!...)` (unsupported).
+        '<' => match iter.clone().next() {
+            Some('=') | Some('!') => None,
+            _ => skip_until_gt(iter),
+        },
+        // Inline flags `(?i)`, `(?m:...)`, lookahead `(?=...)`, etc. are not supported.
+        _ => None,
+    }
+}
+
+/// Consumes characters up to and including the closing `>` of a group name.
+fn skip_until_gt(iter: &mut std::str::Chars) -> Option<()> {
+    loop {
+        if iter.next()? == '>' {
+            return Some(());
+        }
+    }
+}
+
+/// Parses one alternation: a run of `|`-separated branches. When `in_group` it
+/// stops at (and consumes) the matching `)`; otherwise it runs to end of input.
+/// Returns `None` on a malformed pattern (unclosed `(`, stray `)`, bad escape).
+fn parse_branches(iter: &mut std::str::Chars, in_group: bool) -> Option<Vec<Vec<AtomRepeat>>> {
+    let mut branches: Vec<Vec<AtomRepeat>> = vec![];
+    let mut atoms: Vec<AtomRepeat> = vec![];
+    let mut escaped = false;
+    while let Some(next) = iter.next() {
+        match next {
+            '\\' if !escaped => {
+                escaped = true;
+            }
+            '(' if !escaped => {
+                consume_group_prefix(iter)?;
                 atoms.push(AtomRepeat {
-                    atom: Atom::Literal(c.to_string()),
+                    atom: Atom::Alternation(parse_branches(iter, true)?),
                     repeat: Repeat::Once,
                 });
             }
-        };
-        while let Some(next) = iter.next() {
-            match next {
-                '\\' if !escaped => {
-                    escaped = !escaped;
+            ')' if !escaped => {
+                if !in_group {
+                    // A `)` with no open group is malformed (matching the `regex` crate).
+                    return None;
                 }
-                '[' if !escaped => {
-                    atoms.push(AtomRepeat {
-                        atom: parse_group(&mut iter)?,
-                        repeat: Repeat::Once,
-                    });
-                }
-                '*' if !escaped && !atoms.is_empty() => match extract_bindable(&mut atoms) {
-                    Some(atom) => atoms.push(AtomRepeat {
-                        atom,
-                        repeat: Repeat::ZeroOrMore,
-                    }),
-                    None => push_lit(&mut atoms, '*'),
-                },
-                '+' if !escaped && !atoms.is_empty() => match extract_bindable(&mut atoms) {
-                    Some(atom) => atoms.push(AtomRepeat {
-                        atom,
-                        repeat: Repeat::OnceOrMore,
-                    }),
-                    None => push_lit(&mut atoms, '+'),
-                },
-                '?' if !escaped && !atoms.is_empty() => match extract_bindable(&mut atoms) {
-                    Some(atom) => atoms.push(AtomRepeat {
-                        atom,
-                        repeat: Repeat::ZeroOrOnce,
-                    }),
-                    None => push_lit(&mut atoms, '?'),
-                },
-                '{' if !escaped => {
-                    // Probe a clone for a well-formed `{n}`, `{n,}`, or `{n,m}` body so a
-                    // malformed brace can fall through to being a literal `{`.
-                    let mut spec = String::new();
-                    let mut closed = false;
-                    for ch in iter.clone() {
-                        match ch {
-                            '}' => {
-                                closed = true;
-                                break;
-                            }
-                            '0'..='9' | ',' => spec.push(ch),
-                            _ => break,
+                branches.push(atoms);
+                return Some(branches);
+            }
+            '|' if !escaped => {
+                branches.push(std::mem::take(&mut atoms));
+            }
+            '[' if !escaped => {
+                atoms.push(AtomRepeat {
+                    atom: parse_group(iter)?,
+                    repeat: Repeat::Once,
+                });
+            }
+            '*' if !escaped && !atoms.is_empty() => match extract_bindable(&mut atoms) {
+                Some(atom) => atoms.push(AtomRepeat {
+                    atom,
+                    repeat: Repeat::ZeroOrMore,
+                }),
+                None => push_lit(&mut atoms, '*'),
+            },
+            '+' if !escaped && !atoms.is_empty() => match extract_bindable(&mut atoms) {
+                Some(atom) => atoms.push(AtomRepeat {
+                    atom,
+                    repeat: Repeat::OnceOrMore,
+                }),
+                None => push_lit(&mut atoms, '+'),
+            },
+            '?' if !escaped && !atoms.is_empty() => match extract_bindable(&mut atoms) {
+                Some(atom) => atoms.push(AtomRepeat {
+                    atom,
+                    repeat: Repeat::ZeroOrOnce,
+                }),
+                None => push_lit(&mut atoms, '?'),
+            },
+            '{' if !escaped => {
+                // Probe a clone for a well-formed `{n}`, `{n,}`, or `{n,m}` body so a
+                // malformed brace can fall through to being a literal `{`.
+                let mut spec = String::new();
+                let mut closed = false;
+                for ch in iter.clone() {
+                    match ch {
+                        '}' => {
+                            closed = true;
+                            break;
                         }
-                    }
-                    match closed.then(|| parse_repeat_spec(&spec)).flatten() {
-                        Some((min, max)) => {
-                            // Commit: consume the spec and its closing brace, then unroll.
-                            for _ in 0..spec.len() + 1 {
-                                iter.next();
-                            }
-                            if !apply_counted(&mut atoms, min, max) {
-                                push_lit(&mut atoms, '{');
-                                spec.chars().for_each(|ch| push_lit(&mut atoms, ch));
-                                push_lit(&mut atoms, '}');
-                            }
-                        }
-                        // Not a valid count: leave the rest for normal parsing.
-                        None => push_lit(&mut atoms, '{'),
+                        '0'..='9' | ',' => spec.push(ch),
+                        _ => break,
                     }
                 }
-                '^' if !escaped && atoms.is_empty() => {
-                    // Leading start-of-input anchor: a no-op for a prefix matcher.
-                }
-                '$' if !escaped && iter.clone().next().is_none() => atoms.push(AtomRepeat {
-                    atom: Atom::EndOfInput,
-                    repeat: Repeat::Once,
-                }),
-                '.' if !escaped => atoms.push(AtomRepeat {
-                    // `.` matches any char except a newline, matching the `regex` crate.
-                    atom: Atom::Group(true, vec![GroupEntry::Char('\n')]),
-                    repeat: Repeat::Once,
-                }),
-                c => {
-                    if escaped {
-                        escaped = false;
-                        if let Some((inverted, entries)) = shorthand_class(c) {
-                            atoms.push(AtomRepeat {
-                                atom: Atom::Group(inverted, entries),
-                                repeat: Repeat::Once,
-                            });
-                        } else {
-                            match c {
-                                // `\A` (start-of-text) is a no-op at the start of a prefix
-                                // match; anywhere else it can never hold, so reject the pattern.
-                                'A' if atoms.is_empty() => {}
-                                'A' => return None,
-                                // `\z` (end-of-text) is exactly a trailing `$` for this engine.
-                                'z' if iter.clone().next().is_none() => atoms.push(AtomRepeat {
-                                    atom: Atom::EndOfInput,
-                                    repeat: Repeat::Once,
-                                }),
-                                'z' => return None,
-                                'b' => atoms.push(AtomRepeat {
-                                    atom: Atom::WordBoundary(false),
-                                    repeat: Repeat::Once,
-                                }),
-                                'B' => atoms.push(AtomRepeat {
-                                    atom: Atom::WordBoundary(true),
-                                    repeat: Repeat::Once,
-                                }),
-                                'x' | 'u' | 'U' => push_lit(&mut atoms, parse_hex_escape(c, &mut iter)?),
-                                _ => push_lit(&mut atoms, escape_char(c)),
-                            }
+                match closed.then(|| parse_repeat_spec(&spec)).flatten() {
+                    Some((min, max)) => {
+                        // Commit: consume the spec and its closing brace, then unroll.
+                        for _ in 0..spec.len() + 1 {
+                            iter.next();
                         }
+                        if !apply_counted(&mut atoms, min, max) {
+                            push_lit(&mut atoms, '{');
+                            spec.chars().for_each(|ch| push_lit(&mut atoms, ch));
+                            push_lit(&mut atoms, '}');
+                        }
+                    }
+                    // Not a valid count: leave the rest for normal parsing.
+                    None => push_lit(&mut atoms, '{'),
+                }
+            }
+            '^' if !escaped && atoms.is_empty() => {
+                // Leading start-of-input anchor: a no-op for a prefix matcher.
+            }
+            '$' if !escaped && iter.clone().next().is_none() => atoms.push(AtomRepeat {
+                atom: Atom::EndOfInput,
+                repeat: Repeat::Once,
+            }),
+            '.' if !escaped => atoms.push(AtomRepeat {
+                // `.` matches any char except a newline, matching the `regex` crate.
+                atom: Atom::Group(true, vec![GroupEntry::Char('\n')]),
+                repeat: Repeat::Once,
+            }),
+            c => {
+                if escaped {
+                    escaped = false;
+                    if let Some((inverted, entries)) = shorthand_class(c) {
+                        atoms.push(AtomRepeat {
+                            atom: Atom::Group(inverted, entries),
+                            repeat: Repeat::Once,
+                        });
                     } else {
-                        push_lit(&mut atoms, c);
+                        match c {
+                            // `\A` (start-of-text) is a no-op at the start of a prefix
+                            // match; anywhere else it can never hold, so reject the pattern.
+                            'A' if atoms.is_empty() => {}
+                            'A' => return None,
+                            // `\z` (end-of-text) is exactly a trailing `$` for this engine.
+                            'z' if iter.clone().next().is_none() => atoms.push(AtomRepeat {
+                                atom: Atom::EndOfInput,
+                                repeat: Repeat::Once,
+                            }),
+                            'z' => return None,
+                            'b' => atoms.push(AtomRepeat {
+                                atom: Atom::WordBoundary(false),
+                                repeat: Repeat::Once,
+                            }),
+                            'B' => atoms.push(AtomRepeat {
+                                atom: Atom::WordBoundary(true),
+                                repeat: Repeat::Once,
+                            }),
+                            'x' | 'u' | 'U' => push_lit(&mut atoms, parse_hex_escape(c, iter)?),
+                            _ => push_lit(&mut atoms, escape_char(c)),
+                        }
                     }
+                } else {
+                    push_lit(&mut atoms, c);
                 }
             }
         }
-        if escaped {
-            push_lit(&mut atoms, '\\');
-        }
+    }
+    if in_group {
+        // Reached end of input without a closing `)`.
+        return None;
+    }
+    if escaped {
+        push_lit(&mut atoms, '\\');
+    }
+    branches.push(atoms);
+    Some(branches)
+}
+
+impl SimpleRegexAst {
+    pub fn parse(from: &str) -> Option<SimpleRegexAst> {
+        let mut iter = from.chars();
+        let branches = parse_branches(&mut iter, false)?;
+        // A single branch stays a flat atom sequence (no wrapper); multiple
+        // top-level branches become one alternation atom.
+        let atoms = if branches.len() == 1 {
+            branches.into_iter().next().unwrap()
+        } else {
+            vec![AtomRepeat {
+                atom: Atom::Alternation(branches),
+                repeat: Repeat::Once,
+            }]
+        };
         Some(SimpleRegexAst {
             atoms,
         })
@@ -664,5 +751,105 @@ mod tests {
     fn unclosed_group_is_rejected() {
         assert!(SimpleRegexAst::parse("[abc").is_none());
         assert!(SimpleRegexAst::parse("[a-").is_none());
+    }
+
+    /// Helper: assert an atom is an alternation and return its branches.
+    #[track_caller]
+    fn branches(atom: &AtomRepeat) -> &[Vec<AtomRepeat>] {
+        match &atom.atom {
+            Atom::Alternation(branches) => branches,
+            other => panic!("expected alternation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn top_level_alternation_wraps_in_single_atom() {
+        // `a|bc` -> one alternation atom with branches ["a"], ["bc"].
+        let a = atoms("a|bc");
+        assert_eq!(a.len(), 1);
+        let b = branches(&a[0]);
+        assert_eq!(b.len(), 2);
+        assert_lit(&b[0][0], "a");
+        assert_lit(&b[1][0], "bc");
+    }
+
+    #[test]
+    fn single_branch_stays_flat() {
+        // No `|` means no alternation wrapper, just the bare sequence.
+        let a = atoms("abc");
+        assert_eq!(a.len(), 1);
+        assert_lit(&a[0], "abc");
+    }
+
+    #[test]
+    fn group_is_alternation_atom() {
+        // `(ab)` -> a single-branch alternation atom holding "ab".
+        let a = atoms("(ab)");
+        assert_eq!(a.len(), 1);
+        let b = branches(&a[0]);
+        assert_eq!(b.len(), 1);
+        assert_lit(&b[0][0], "ab");
+    }
+
+    #[test]
+    fn quantifier_binds_to_group() {
+        // `(ab)*` -> the alternation atom carries the ZeroOrMore repeat.
+        let a = atoms("(ab)*");
+        assert_eq!(a.len(), 1);
+        assert!(matches!(a[0].repeat, Repeat::ZeroOrMore));
+        let b = branches(&a[0]);
+        assert_lit(&b[0][0], "ab");
+    }
+
+    #[test]
+    fn nested_group_inside_branch() {
+        // `(a(b|c))` -> outer single-branch alternation whose branch is `a` then an
+        // inner alternation of `b` / `c`.
+        let a = atoms("(a(b|c))");
+        let outer = branches(&a[0]);
+        assert_eq!(outer.len(), 1);
+        assert_lit(&outer[0][0], "a");
+        let inner = branches(&outer[0][1]);
+        assert_eq!(inner.len(), 2);
+        assert_lit(&inner[0][0], "b");
+        assert_lit(&inner[1][0], "c");
+    }
+
+    #[test]
+    fn empty_branches_are_allowed() {
+        // `(a||b)` -> three branches, the middle one empty.
+        let a = atoms("(a||b)");
+        let b = branches(&a[0]);
+        assert_eq!(b.len(), 3);
+        assert!(b[1].is_empty());
+    }
+
+    #[test]
+    fn group_modifiers_are_skipped() {
+        // Non-capturing and named groups parse to a plain alternation.
+        for pattern in ["(?:a|b)", "(?P<n>a|b)", "(?<n>a|b)"] {
+            let a = atoms(pattern);
+            let b = branches(&a[0]);
+            assert_eq!(b.len(), 2, "{pattern}");
+            assert_lit(&b[0][0], "a");
+            assert_lit(&b[1][0], "b");
+        }
+    }
+
+    #[test]
+    fn malformed_group_syntax_is_rejected() {
+        assert!(SimpleRegexAst::parse("(abc").is_none()); // unclosed
+        assert!(SimpleRegexAst::parse("abc)").is_none()); // stray close
+        assert!(SimpleRegexAst::parse("(?i)x").is_none()); // inline flags
+        assert!(SimpleRegexAst::parse("(?=x)").is_none()); // lookahead
+        assert!(SimpleRegexAst::parse("(?<=x)").is_none()); // lookbehind
+    }
+
+    #[test]
+    fn escaped_group_metachars_are_literal() {
+        // `\(`, `\|`, `\)` are literal characters, not structural.
+        let a = atoms("\\(a\\|b\\)");
+        assert_eq!(a.len(), 1);
+        assert_lit(&a[0], "(a|b)");
     }
 }

@@ -8,11 +8,14 @@ use compiler_tools_derive::token_parse;
 pub enum TokenSimple<'a> {
     Async = "async",
     Plus = "+",
-    #[token(regex = "(?i)\\*|\\+")]
+    #[token(regex = "\\*|\\+")]
     OrTest(&'a str),
     #[token(regex = "[a-z][a-zA-Z0-9_]*")]
     Ident(&'a str),
-    #[token(regex = "/\\*.*\\*/")]
+    // The simple engine is greedy/leftmost-longest, so a bare `/\*.*\*/` would span
+    // to the *last* `*/` in the input (like the `regex` crate). The classic
+    // alternation/grouping form stops at the first `*/`, matching one comment.
+    #[token(regex = "/\\*([^*]|\\*[^/])*\\*/")]
     CommentBlock(&'a str),
 }
 
