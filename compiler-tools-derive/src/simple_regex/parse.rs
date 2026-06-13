@@ -30,6 +30,41 @@ fn escape_char(c: char) -> char {
     }
 }
 
+/// Decodes a numeric/codepoint escape that has already consumed its leading
+/// `\x`, `\u`, or `\U`. Accepts either a fixed run of hex digits (2 for `\x`,
+/// 4 for `\u`, 8 for `\U`, matching the `regex` crate) or a braced `{...}` run of
+/// any length. Returns `None` for a malformed or out-of-range codepoint so the
+/// whole pattern is rejected with a `compile_error!`.
+fn parse_hex_escape(kind: char, iter: &mut impl Iterator<Item = char>) -> Option<char> {
+    let width = match kind {
+        'x' => 2,
+        'u' => 4,
+        'U' => 8,
+        _ => return None,
+    };
+    let mut hex = String::new();
+    match iter.next()? {
+        '{' => loop {
+            match iter.next()? {
+                '}' => break,
+                h if h.is_ascii_hexdigit() => hex.push(h),
+                _ => return None,
+            }
+        },
+        h if h.is_ascii_hexdigit() => {
+            hex.push(h);
+            for _ in 1..width {
+                match iter.next()? {
+                    h if h.is_ascii_hexdigit() => hex.push(h),
+                    _ => return None,
+                }
+            }
+        }
+        _ => return None,
+    }
+    char::from_u32(u32::from_str_radix(&hex, 16).ok()?)
+}
+
 /// Expands a Perl-style shorthand class escape into `(inverted, entries)`. ASCII
 /// semantics are used (matching the `regex` crate's `(?-u)` byte mode); use
 /// `regex_full` for Unicode-aware classes. Returns `None` for a non-shorthand
@@ -104,7 +139,7 @@ fn extract_bindable(atoms: &mut Vec<AtomRepeat>) -> Option<Atom> {
             Some(Atom::Literal(c.to_string()))
         }
         Atom::Group(..) => Some(atoms.pop().unwrap().atom),
-        Atom::EndOfInput => None,
+        Atom::EndOfInput | Atom::WordBoundary(_) => None,
     }
 }
 
@@ -173,7 +208,10 @@ fn parse_group(iter: &mut impl Iterator<Item = char>) -> Option<Atom> {
                         first = false;
                         continue;
                     }
-                    escape_char(c)
+                    match c {
+                        'x' | 'u' | 'U' => parse_hex_escape(c, iter)?,
+                        _ => escape_char(c),
+                    }
                 } else {
                     c
                 };
@@ -303,7 +341,28 @@ impl SimpleRegexAst {
                                 repeat: Repeat::Once,
                             });
                         } else {
-                            push_lit(&mut atoms, escape_char(c));
+                            match c {
+                                // `\A` (start-of-text) is a no-op at the start of a prefix
+                                // match; anywhere else it can never hold, so reject the pattern.
+                                'A' if atoms.is_empty() => {}
+                                'A' => return None,
+                                // `\z` (end-of-text) is exactly a trailing `$` for this engine.
+                                'z' if iter.clone().next().is_none() => atoms.push(AtomRepeat {
+                                    atom: Atom::EndOfInput,
+                                    repeat: Repeat::Once,
+                                }),
+                                'z' => return None,
+                                'b' => atoms.push(AtomRepeat {
+                                    atom: Atom::WordBoundary(false),
+                                    repeat: Repeat::Once,
+                                }),
+                                'B' => atoms.push(AtomRepeat {
+                                    atom: Atom::WordBoundary(true),
+                                    repeat: Repeat::Once,
+                                }),
+                                'x' | 'u' | 'U' => push_lit(&mut atoms, parse_hex_escape(c, &mut iter)?),
+                                _ => push_lit(&mut atoms, escape_char(c)),
+                            }
                         }
                     } else {
                         push_lit(&mut atoms, c);
@@ -538,6 +597,59 @@ mod tests {
         assert!(matches!(a.last().unwrap().atom, Atom::EndOfInput));
         // A non-trailing `$` is an ordinary literal.
         assert_lit(&atoms("a$b")[0], "a$b");
+    }
+
+    #[test]
+    fn hex_escapes_decode() {
+        // \x with two hex digits, and braced forms for \x \u \U.
+        assert_lit(&atoms("\\x41")[0], "A");
+        assert_lit(&atoms("\\x{41}")[0], "A");
+        assert_lit(&atoms("\\u{2764}")[0], "\u{2764}");
+        assert_lit(&atoms("\\u0041")[0], "A");
+        assert_lit(&atoms("\\U00000041")[0], "A");
+        // A hex escape can sit in the middle of a literal run.
+        assert_lit(&atoms("a\\x42c")[0], "aBc");
+    }
+
+    #[test]
+    fn malformed_hex_escape_is_rejected() {
+        assert!(SimpleRegexAst::parse("\\x4").is_none()); // too few digits
+        assert!(SimpleRegexAst::parse("\\xZZ").is_none()); // non-hex
+        assert!(SimpleRegexAst::parse("\\x{}").is_none()); // empty braces
+        assert!(SimpleRegexAst::parse("\\u{110000}").is_none()); // not a scalar value
+    }
+
+    #[test]
+    fn hex_escape_inside_class() {
+        // \x41 -> 'A', used as a plain member and as a range bound.
+        assert_group(&atoms("[\\x41]")[0], false, &[GroupEntry::Char('A')]);
+        assert_group(&atoms("[\\x41-\\x5A]")[0], false, &[GroupEntry::Range('A', 'Z')]);
+    }
+
+    #[test]
+    fn start_text_anchor_matches_caret() {
+        // \A at the start is a no-op anchor and is dropped.
+        let a = atoms("\\Aab");
+        assert_eq!(a.len(), 1);
+        assert_lit(&a[0], "ab");
+        // \A anywhere else can never hold, so the pattern is rejected.
+        assert!(SimpleRegexAst::parse("a\\Ab").is_none());
+    }
+
+    #[test]
+    fn end_text_anchor_matches_dollar() {
+        // \z at the end lowers to the same end-of-input assertion as `$`.
+        let a = atoms("ab\\z");
+        assert!(matches!(a.last().unwrap().atom, Atom::EndOfInput));
+        assert!(SimpleRegexAst::parse("a\\zb").is_none());
+    }
+
+    #[test]
+    fn word_boundaries_parse() {
+        let b = atoms("\\bword\\b");
+        assert!(matches!(b.first().unwrap().atom, Atom::WordBoundary(false)));
+        assert!(matches!(b.last().unwrap().atom, Atom::WordBoundary(false)));
+        assert!(matches!(atoms("\\B")[0].atom, Atom::WordBoundary(true)));
     }
 
     #[test]

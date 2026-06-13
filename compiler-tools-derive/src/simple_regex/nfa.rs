@@ -8,8 +8,10 @@ pub enum TransitionEvent {
     Char(char),
     // (inverted, set)
     Chars(bool, Vec<GroupEntry>),
-    /// Zero-width `$` assertion: only taken when the input is exhausted.
+    /// Zero-width `$` / `\z` assertion: only taken when the input is exhausted.
     EndOfInput,
+    /// Zero-width word-boundary assertion (`\b` / `\B`); the bool negates it.
+    WordBoundary(bool),
     End,
 }
 
@@ -36,7 +38,7 @@ impl TransitionEvent {
                 *inverted
             }
             // A zero-width assertion never consumes a character.
-            TransitionEvent::EndOfInput => false,
+            TransitionEvent::EndOfInput | TransitionEvent::WordBoundary(_) => false,
             TransitionEvent::End => true,
         }
     }
@@ -44,9 +46,9 @@ impl TransitionEvent {
     pub fn completely_shadows(&self, other: &TransitionEvent) -> bool {
         match (self, other) {
             (TransitionEvent::Epsilon, _) | (_, TransitionEvent::Epsilon) | (_, TransitionEvent::End) => false,
-            // A `$` assertion is conditioned on EOF rather than a character, so it neither
-            // shadows nor is shadowed by any other edge; keep it independent of `End`.
-            (TransitionEvent::EndOfInput, _) | (_, TransitionEvent::EndOfInput) => false,
+            // Zero-width assertions (`$`, `\b`, `\B`) are conditioned on position rather than
+            // a consumed character, so they neither shadow nor are shadowed by any other edge.
+            (TransitionEvent::EndOfInput | TransitionEvent::WordBoundary(_), _) | (_, TransitionEvent::EndOfInput | TransitionEvent::WordBoundary(_)) => false,
             (TransitionEvent::End, _) => true,
             (TransitionEvent::Char(c1), TransitionEvent::Char(c2)) => c1 == c2,
             //TODO: this could be true, investigate
@@ -72,6 +74,7 @@ fn event_from_atom(atom: &Atom) -> Vec<TransitionEvent> {
             vec![TransitionEvent::Chars(*inverted, entries.clone())]
         }
         Atom::EndOfInput => vec![TransitionEvent::EndOfInput],
+        Atom::WordBoundary(negate) => vec![TransitionEvent::WordBoundary(*negate)],
     }
 }
 

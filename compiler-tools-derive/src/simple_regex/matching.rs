@@ -21,8 +21,8 @@ impl SimpleRegex {
                         return true;
                     }
                 }
-                // A zero-width `$` assertion consumes nothing.
-                Atom::EndOfInput => {}
+                // Zero-width assertions consume nothing.
+                Atom::EndOfInput | Atom::WordBoundary(_) => {}
             }
         }
         false

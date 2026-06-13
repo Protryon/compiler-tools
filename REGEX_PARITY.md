@@ -23,10 +23,20 @@ is the main thing blocking alternation/grouping.
   `regex` crate's `(?-u)` mode). Work top-level and inside `[...]`; a *negated*
   shorthand inside a positive class is rejected (the flat group model can't union
   it). See `shorthand_class`.
-- Anchors `^` (leading) and `$` (trailing): a leading `^` is a no-op for this
-  prefix matcher and is dropped; a trailing `$` lowers to an `Atom::EndOfInput`
-  zero-width assertion (`TransitionEvent::EndOfInput`, only taken at EOF). Anchors
-  anywhere else in the pattern are literal characters.
+- Anchors `^`/`\A` (leading) and `$`/`\z` (trailing): a leading `^`/`\A` is a no-op
+  for this prefix matcher and is dropped; a trailing `$`/`\z` lowers to an
+  `Atom::EndOfInput` zero-width assertion (`TransitionEvent::EndOfInput`, only taken
+  at EOF). A literal `^`/`$` elsewhere stays literal; a `\A`/`\z` elsewhere is rejected
+  (it can never hold).
+- Word boundaries `\b` / `\B` (ASCII `[0-9A-Za-z_]` word-ness, input edges count as
+  non-word). Lowered to `Atom::WordBoundary` / `TransitionEvent::WordBoundary`,
+  evaluated against the previous and lookahead chars in the matcher loop. The matcher
+  does not backtrack, so a boundary that would require *un*-consuming a greedy match
+  (e.g. `.*\bx`) won't match where the `regex` crate would — `\bword\b`-style usage is
+  fine. See the loop in `generate.rs`.
+- Numeric / codepoint escapes: fixed-width hex `\x41` (2), `\uXXXX` (4),
+  `\UXXXXXXXX` (8) and the braced `\x{..}` / `\u{..}` / `\U{..}` forms, top-level and
+  inside `[...]` (including as range bounds). See `parse_hex_escape`.
 
 ## Still missing
 
@@ -41,9 +51,9 @@ is the main thing blocking alternation/grouping.
   currently consumed as a literal (see `double_repeat_treats_second_as_literal`).
 
 ### Anchors & boundaries
-- [ ] **`\A`, `\z`** and multiline / mid-pattern anchor semantics. Only leading `^`
-  and trailing `$` are modeled today.
-- [ ] **Word boundaries** — `\b`, `\B`.
+- [ ] **Multiline / mid-pattern anchor semantics** — `^`/`$` as line anchors under
+  `(?m)`. Only the leading-`^`/trailing-`$` (start/end of haystack) cases are modeled;
+  a prefix matcher has no line context. `\A`, `\z`, `\b`, `\B` are done.
 
 ### Character-class shorthands
 - [ ] **Negated shorthands inside a class** — e.g. `[\D]`, `[a\W]`. Currently
@@ -51,11 +61,11 @@ is the main thing blocking alternation/grouping.
   union of a positive set and a negated subset.
 - [ ] **POSIX classes** — `[[:alpha:]]`, etc.
 - [ ] **Unicode classes** — `\p{...}`, `\P{...}` and Unicode-aware class semantics.
-  (Shorthand classes are ASCII-only too.) See the `// TODO: ... unicode ident_start`
-  note in `mod.rs:22`.
+  (Shorthand classes and `\b` word-ness are ASCII-only too.) See the
+  `// TODO: ... unicode ident_start` note in `mod.rs:22`.
 
 ### Escapes & flags
-- [ ] **Numeric / codepoint escapes** — `\x41`, `\u{...}`, `\123`.
+- [ ] **Octal escapes** — `\123`, `\o{...}`. (Hex/codepoint escapes are supported.)
 - [ ] **Inline flags / modes** — `(?i)` case-insensitive, `(?m)` multiline,
   `(?s)` dotall, `(?x)` verbose, and the grouped `(?i:...)` forms.
 

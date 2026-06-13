@@ -31,11 +31,16 @@ pub enum Atom {
     Literal(String),
     // (inverted, items)
     Group(bool, Vec<GroupEntry>),
-    /// A zero-width `$` assertion: the match only completes when the input is
-    /// exhausted. There is no start-of-input counterpart because this engine
-    /// always matches a prefix from the current position, so a leading `^` is a
-    /// no-op and is dropped at parse time.
+    /// A zero-width `$` / `\z` assertion: the match only completes when the input
+    /// is exhausted. There is no start-of-input counterpart because this engine
+    /// always matches a prefix from the current position, so a leading `^` / `\A`
+    /// is a no-op and is dropped at parse time.
     EndOfInput,
+    /// A zero-width word-boundary assertion (`\b` when `false`, `\B` when `true`).
+    /// Holds when the word-ness (`[0-9A-Za-z_]`, ASCII) of the previous and next
+    /// characters differ (`\b`) or match (`\B`); the edges of the input count as
+    /// non-word. Consumes nothing.
+    WordBoundary(bool),
 }
 
 #[derive(Debug, Clone)]
