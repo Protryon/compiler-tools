@@ -29,6 +29,9 @@ impl<'a, T: TokenParse<'a>> TokenizerWrap<'a, T> {
         }
     }
 
+    // Deliberately an inherent method rather than an `Iterator::next`; see IMPROVEMENTS.md
+    // item 1 for the (separate) work of giving the wrapper a real `Iterator` impl.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<Spanned<T::Token>> {
         if let Some(peeked) = self.peeked.take() {
             Some(peeked)

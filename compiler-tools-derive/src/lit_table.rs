@@ -115,7 +115,7 @@ impl LitTable {
 
     //TODO: straightshot optimization
     pub(super) fn emit(&self, fn_name: &Ident, enum_ident: &Ident) -> TokenStream {
-        let internal = self.emit_internal(&enum_ident, None);
+        let internal = self.emit_internal(enum_ident, None);
         // println!("{}", internal);
         quote! {
             // returns (token, remaining, newlines_skipped)

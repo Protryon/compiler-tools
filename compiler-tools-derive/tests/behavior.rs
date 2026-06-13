@@ -187,6 +187,20 @@ fn illegal_tokens_track_lines_and_columns() {
 }
 
 #[test]
+fn spans_track_newline_within_multichar_token() {
+    // Regression: a single token that contains a newline followed by more text must
+    // reset the column to the number of characters *after* the last newline, not to
+    // the newline's own offset. Here the `Ws` token is "\n  " (newline + two spaces).
+    let spans = lex_spans("a\n  bc");
+    assert_eq!(spans.len(), 3);
+    // The whitespace ends on line 1 at column 2 (past the two spaces).
+    assert_eq!((spans[1].span.line_stop, spans[1].span.col_stop), (1, 2));
+    // "bc" therefore starts at column 2, not column 0.
+    assert_eq!((spans[2].span.line_start, spans[2].span.col_start), (1, 2));
+    assert_eq!((spans[2].span.line_stop, spans[2].span.col_stop), (1, 4));
+}
+
+#[test]
 fn no_lifetime_grammar_lexes() {
     let toks: Vec<Sym> = {
         let mut tokenizer = SymTokenizer::new("..@");
