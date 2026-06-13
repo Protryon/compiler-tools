@@ -40,7 +40,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { rust: 1.75.0, os: ubuntu-22.04 }
+          - { rust: 1.85.0, os: ubuntu-22.04 }
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -66,7 +66,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { rust: nightly-2024-03-31, os: ubuntu-22.04 }
+          - { rust: nightly-2025-03-01, os: ubuntu-22.04 }
     steps:
       - name: Checkout
         uses: actions/checkout@v4

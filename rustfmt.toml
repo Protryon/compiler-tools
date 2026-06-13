@@ -1,4 +1,4 @@
-edition = "2021"
+edition = "2024"
 
 max_width = 160
 # rustfmt breaks the send_request macros
