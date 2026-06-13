@@ -471,12 +471,32 @@ mod tests {
 
     #[test]
     fn unsupported_or_malformed_group_syntax_is_rejected() {
-        // Unclosed group, stray close, lookaround and inline flags are rejected.
+        // Unclosed group, stray close, lookaround and unmodellable flags are rejected.
         assert!(SimpleRegex::parse("(abc").is_none());
         assert!(SimpleRegex::parse("abc)").is_none());
         assert!(SimpleRegex::parse("(?=foo)").is_none());
         assert!(SimpleRegex::parse("(?<=foo)bar").is_none());
-        assert!(SimpleRegex::parse("(?i)foo").is_none());
+        assert!(SimpleRegex::parse("(?m)foo").is_none()); // multiline
+    }
+
+    #[test]
+    fn case_insensitive_flag_matches_either_case() {
+        let re = SimpleRegex::parse("(?i)foo").unwrap();
+        assert_eq!(re.find_prefix("FoObar"), Some(("FoO", "bar")));
+        assert_eq!(re.find_prefix("FOO"), Some(("FOO", "")));
+        assert_eq!(re.find_prefix("bar"), None);
+        // Scoped form only folds the group body.
+        let scoped = SimpleRegex::parse("a(?i:b)c").unwrap();
+        assert_eq!(scoped.find_prefix("aBc"), Some(("aBc", "")));
+        assert_eq!(scoped.find_prefix("Abc"), None);
+    }
+
+    #[test]
+    fn dotall_flag_matches_newline() {
+        let re = SimpleRegex::parse("(?s)a.b").unwrap();
+        assert_eq!(re.find_prefix("a\nb"), Some(("a\nb", "")));
+        // Without the flag, `.` will not cross a newline.
+        assert_eq!(SimpleRegex::parse("a.b").unwrap().find_prefix("a\nb"), None);
     }
 
     #[test]

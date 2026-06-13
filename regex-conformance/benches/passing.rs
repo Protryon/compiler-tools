@@ -98,10 +98,7 @@ fn bench_passing(c: &mut Criterion) {
     group.bench_function("regex-crate", |b| {
         b.iter(|| {
             for case in &cases {
-                black_box(run_search(
-                    |input| case.full.find(input).map(|m| (m.as_str(), &input[m.end()..])),
-                    case.test,
-                ));
+                black_box(run_search(|input| case.full.find(input).map(|m| (m.as_str(), &input[m.end()..])), case.test));
             }
         });
     });

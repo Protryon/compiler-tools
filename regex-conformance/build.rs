@@ -14,7 +14,17 @@ use std::{
 
 use compiler_tools_regex::{SimpleRegex, flatten};
 use quote::{format_ident, quote};
-use regex_test::RegexTests;
+use regex_test::{RegexTest, RegexTests};
+
+/// Byte-for-byte copy of `regex_conformance::effective_pattern` (a build script
+/// can't depend on its own crate). Folds the corpus' test-level options into
+/// inline flags — currently `case-insensitive = true` → a leading `(?i)` — so the
+/// compiled matcher and the runtime interpreter parse the same pattern. Keep in
+/// sync with `src/lib.rs`.
+fn effective_pattern(test: &RegexTest) -> String {
+    let pattern = &test.regexes()[0];
+    if test.case_insensitive() { format!("(?i){pattern}") } else { pattern.clone() }
+}
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -43,11 +53,10 @@ fn main() {
     let mut fns = vec![];
     let mut entries = vec![];
     for (i, test) in tests.iter().enumerate() {
-        let regexes = test.regexes();
-        if regexes.len() != 1 {
+        if test.regexes().len() != 1 {
             continue;
         }
-        let Some(re) = SimpleRegex::parse(&regexes[0]) else {
+        let Some(re) = SimpleRegex::parse(&effective_pattern(test)) else {
             continue;
         };
         let ident = format_ident!("compiled_{}", i);

@@ -59,6 +59,22 @@ match the `regex` crate (e.g. `a|ab` on `"ab"` → `"a"`).
 - **Non-capturing / named groups** `(?:...)`, `(?P<name>...)`, `(?<name>...)` — all
   treated identically (this engine extracts no capture spans). See
   `consume_group_prefix`.
+- **Inline flags / modes** — both the bare `(?flags)` directive (applies to the rest
+  of the enclosing group, crossing `|`) and the scoped `(?flags:...)` group, including
+  the clearing `-` (`(?i-s:...)`). Supported letters:
+  - `i` — ASCII case-insensitive. A cased literal becomes a two-case group and a class
+    member/range is folded to both cases (`(?i)[a-c]` also matches `A`..`C`); folding
+    the members *before* `[^...]` negation makes `(?i)[^a]` exclude both cases. Unicode
+    case-folding is **not** done — use `regex_full` for that.
+  - `s` — dot-all: `.` lowers to an inverted *empty* class, so it also matches `\n`.
+  - `x` — verbose: unescaped whitespace is dropped and `#` starts a line comment
+    (neither applies inside `[...]`); `\ ` is still a literal space.
+  - `U` — swap-greedy: every quantifier's default greediness is flipped, so a trailing
+    `?` un-flips it (`(?U)a*` is lazy, `(?U)a*?` greedy).
+  - `u` — Unicode toggle, accepted as a **no-op** (this engine is ASCII-only, so `(?-u)`
+    is already its native mode and `(?u)` can't upgrade it). This is what lets the
+    many `(?-u:...)` no-unicode patterns parse.
+  See `Flags` / `apply_flag` / `consume_group_prefix` in `parse.rs`.
 
 ## Still missing
 
@@ -78,10 +94,10 @@ match the `regex` crate (e.g. `a|ab` on `"ab"` → `"a"`).
 
 ### Escapes & flags
 - [ ] **Octal escapes** — `\123`, `\o{...}`. (Hex/codepoint escapes are supported.)
-- [ ] **Inline flags / modes** — `(?i)` case-insensitive, `(?m)` multiline,
-  `(?s)` dotall, `(?x)` verbose, and the grouped `(?i:...)` forms. These are now
-  *rejected* at parse time (a hard `compile_error!`) rather than silently
-  mis-parsed.
+- [ ] **Multiline / CRLF flags** — `(?m)` and `(?R)`. These retarget `^`/`$`/`.` to
+  line boundaries, which a context-free prefix matcher with no view across its input
+  edge can't model, so a pattern using either flag is *rejected* at parse time (a hard
+  `compile_error!`). `(?i) (?s) (?x) (?U) (?u)` are supported — see above.
 
 ## Not a gap (the `regex` crate doesn't support these either)
 
@@ -102,28 +118,33 @@ non-UTF-8 haystack this `&str`-based engine can't represent).
 
 Run: `cargo test --package regex-conformance --test conformance -- --nocapture`
 
+The harness also folds the corpus' *test-level* options into inline flags so a
+pattern behaves like it would under the `regex` crate's builder switches: a test with
+`case-insensitive = true` is run as `(?i)<pattern>` (see `effective_pattern`, mirrored
+in both `src/lib.rs` and `build.rs`). Only `case-insensitive` is wired up so far.
+
 Latest results (both engines are identical, confirming the interpreter and the
 generated matcher stay in lock-step):
 
 | | runtime interpreter | compiled-rust engine |
 |---|---|---|
 | total | 1184 | 1184 |
-| pass | 590 | 590 |
-| fail-to-parse | 207 | 207 |
-| fail-to-pass | 318 | 318 |
-| skipped | 69 | 69 |
-| per search | ~2.9 µs | ~1.6 µs |
+| pass | 622 | 622 |
+| fail-to-parse | 161 | 161 |
+| fail-to-pass | 328 | 328 |
+| skipped | 73 | 73 |
+| per search | ~2.7 µs | ~1.6 µs |
 
-Switching to a priority-preserving (leftmost-first) subset construction with lazy
-quantifier support raised the pass count 568 → 590 and dropped fail-to-pass 340 → 318,
-with no change to construction time (accept-truncation keeps the ordered-subset state
-space bounded). Earlier, adding alternation/grouping had already more than doubled the
-pass count (269 → 568). fail-to-parse stays at 207: now that `(` / `)` / `|` are
-structural, patterns using unsupported group syntax (inline flags, lookaround) are
-explicitly rejected instead of silently mis-parsed as literals — a cleaner failure
-mode. The remaining fail-to-pass cases stem from the gaps above (ASCII-only Unicode, no
-backtracking for boundaries). The `--nocapture` output lists every failing test name to
-make triage easy.
+Adding inline flags (`(?imsxU)` directives and scoped groups) plus the harness'
+`case-insensitive` → `(?i)` folding raised the pass count 590 → 622 and dropped
+fail-to-parse 207 → 161 (46 patterns that used to be rejected now parse — case-folding,
+dot-all, verbose, swap-greedy and the no-op `(?-u)`/`(?u)` toggles). Some of those land
+in fail-to-pass instead (318 → 328): chiefly Unicode case-folding the ASCII fold can't
+reproduce. Earlier milestones: switching to a priority-preserving (leftmost-first)
+subset construction with lazy quantifiers took 568 → 590; alternation/grouping before
+that more than doubled it (269 → 568). The remaining fail-to-pass cases stem from the
+gaps above (ASCII-only Unicode, no backtracking for boundaries, no multiline). The
+`--nocapture` output lists every failing test name to make triage easy.
 
 ## Escape hatch
 

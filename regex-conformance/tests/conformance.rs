@@ -18,7 +18,7 @@
 
 use std::time::{Duration, Instant};
 
-use regex_conformance::{SimpleRegex, compiled_lookup, load_corpus, passes, run_search};
+use regex_conformance::{SimpleRegex, compiled_lookup, effective_pattern, load_corpus, passes, run_search};
 use regex_test::{RegexTest, RegexTests};
 
 /// What an engine could do with a given test before we try to run it.
@@ -127,10 +127,10 @@ fn conformance_summary() {
 
     // Runtime interpreter: `SimpleRegex::find_prefix` walks the DFA directly.
     let runtime = summarize("runtime interpreter", &tests, |test| {
-        let [pattern] = test.regexes() else {
+        let [_] = test.regexes() else {
             return Prepared::Skip; // regex sets are out of scope for this engine
         };
-        match SimpleRegex::parse(pattern) {
+        match SimpleRegex::parse(&effective_pattern(test)) {
             Some(regex) => Prepared::Run(Box::new(move |input| regex.find_prefix(input))),
             None => Prepared::FailToParse,
         }
@@ -138,11 +138,11 @@ fn conformance_summary() {
 
     // Compiled-Rust engine: the matchers `build.rs` emitted via `generate_parser`.
     let compiled = summarize("compiled-rust engine", &tests, |test| {
-        let [pattern] = test.regexes() else {
+        let [_] = test.regexes() else {
             return Prepared::Skip;
         };
         // Use the parser to tell "couldn't parse" apart from "parsed but no matcher".
-        if SimpleRegex::parse(pattern).is_none() {
+        if SimpleRegex::parse(&effective_pattern(test)).is_none() {
             return Prepared::FailToParse;
         }
         match compiled_lookup(test.full_name()) {

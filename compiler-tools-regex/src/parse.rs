@@ -5,6 +5,75 @@ use super::*;
 /// blow up macro-expansion time / generated code size.
 const MAX_REPEAT: usize = 1024;
 
+/// The inline mode flags (`(?imsxU)`) currently in effect while parsing. Flags
+/// are scoped: a bare `(?flags)` directive mutates the flags for the rest of the
+/// enclosing group, while a `(?flags:...)` group applies them only to its body.
+///
+/// The `u` (Unicode) flag is accepted but ignored — this engine is ASCII-only, so
+/// `(?-u)` is already its native behaviour and `(?u)` cannot upgrade it. The `m`
+/// (multiline) and `R` (CRLF) flags are *rejected* (the pattern fails to parse):
+/// they retarget `^`/`$`/`.` to line boundaries, which a context-free prefix
+/// matcher with no view across its input edge cannot model.
+#[derive(Clone, Copy, Default)]
+struct Flags {
+    /// `i` — ASCII case-insensitive. A cased literal/class member matches both cases.
+    case_insensitive: bool,
+    /// `s` — dot-all: `.` also matches `\n`.
+    dot_matches_newline: bool,
+    /// `x` — verbose: unescaped whitespace is ignored and `#` starts a line comment.
+    ignore_whitespace: bool,
+    /// `U` — swap-greedy: the default greediness of every quantifier is flipped, so
+    /// a trailing `?` un-flips it again.
+    swap_greedy: bool,
+}
+
+/// Applies one flag letter to `flags`, setting it when `negate` is false and
+/// clearing it after a `-`. Returns `None` for an unsupported flag (`m`, `R`) or
+/// an unknown letter so the whole pattern is rejected rather than mis-parsed.
+fn apply_flag(flags: &mut Flags, c: char, negate: bool) -> Option<()> {
+    let value = !negate;
+    match c {
+        'i' => flags.case_insensitive = value,
+        's' => flags.dot_matches_newline = value,
+        'x' => flags.ignore_whitespace = value,
+        'U' => flags.swap_greedy = value,
+        // `u` (Unicode) is a no-op: this engine is ASCII-only either way.
+        'u' => {}
+        // `m` (multiline) and `R` (CRLF) can't be modeled by a prefix matcher.
+        _ => return None,
+    }
+    Some(())
+}
+
+/// Expands one class entry into `out` under ASCII case-folding: a cased member is
+/// emitted alongside its opposite case so `(?i)[a-c]` also matches `A`..`C`.
+/// Folding the *members* (before any `[^...]` negation) is what makes
+/// `(?i)[^a]` correctly exclude both `a` and `A`.
+fn fold_entry(entry: GroupEntry, out: &mut Vec<GroupEntry>) {
+    out.push(entry);
+    match entry {
+        GroupEntry::Char(c) if c.is_ascii_alphabetic() => {
+            out.push(GroupEntry::Char(if c.is_ascii_lowercase() {
+                c.to_ascii_uppercase()
+            } else {
+                c.to_ascii_lowercase()
+            }));
+        }
+        GroupEntry::Range(a, b) => {
+            // Fold the range's lowercase span up to uppercase, and vice versa.
+            let (lo, hi) = (a.max('a'), b.min('z'));
+            if lo <= hi {
+                out.push(GroupEntry::Range(lo.to_ascii_uppercase(), hi.to_ascii_uppercase()));
+            }
+            let (lo, hi) = (a.max('A'), b.min('Z'));
+            if lo <= hi {
+                out.push(GroupEntry::Range(lo.to_ascii_lowercase(), hi.to_ascii_lowercase()));
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Pops the pending `Char('-')` and the range's start char off `entries`, returning
 /// the start char. Returns `None` on a malformed state rather than panicking, so a bad
 /// pattern surfaces as a `compile_error!` instead of an ICE-style proc-macro panic.
@@ -191,7 +260,7 @@ fn consume_lazy(iter: &mut std::str::Chars) -> bool {
     }
 }
 
-fn parse_group(iter: &mut impl Iterator<Item = char>) -> Option<Atom> {
+fn parse_group(iter: &mut impl Iterator<Item = char>, flags: Flags) -> Option<Atom> {
     let mut group_entries = vec![];
     let mut escaped = false;
     let mut in_range = false;
@@ -252,6 +321,14 @@ fn parse_group(iter: &mut impl Iterator<Item = char>) -> Option<Atom> {
         }
     }
 
+    if flags.case_insensitive {
+        let mut folded = Vec::with_capacity(group_entries.len());
+        for entry in group_entries {
+            fold_entry(entry, &mut folded);
+        }
+        group_entries = folded;
+    }
+
     Some(Atom::Group(inverted, group_entries))
 }
 
@@ -274,36 +351,90 @@ fn push_lit(atoms: &mut Vec<AtomRepeat>, c: char) {
     }
 }
 
+/// Appends a content character, honouring `(?i)`: a cased ASCII letter becomes a
+/// two-member group matching both cases (which can't coalesce into a literal run),
+/// any other char falls through to [`push_lit`].
+fn push_char(atoms: &mut Vec<AtomRepeat>, c: char, flags: Flags) {
+    if flags.case_insensitive && c.is_ascii_alphabetic() {
+        atoms.push(AtomRepeat {
+            atom: Atom::Group(false, vec![GroupEntry::Char(c.to_ascii_lowercase()), GroupEntry::Char(c.to_ascii_uppercase())]),
+            repeat: Repeat::Once,
+            lazy: false,
+        });
+    } else {
+        push_lit(atoms, c);
+    }
+}
+
+/// What a `(...)` prefix turned out to be once its leading `(?...)` modifier (if
+/// any) was consumed.
+enum GroupPrefix {
+    /// A real sub-expression to recurse into, with these flags active in its body.
+    Group(Flags),
+    /// A bare `(?flags)` directive — no sub-expression; the returned flags become
+    /// the current flags for the rest of the enclosing group.
+    SetFlags(Flags),
+}
+
 /// Consumes the group-modifier prefix immediately after a `(`, if any, leaving
-/// `iter` positioned at the start of the group body. Returns `None` for an
-/// unsupported `(?...)` construct (inline flags, lookaround) so the whole pattern
-/// is rejected rather than silently mis-parsed.
+/// `iter` positioned at the start of the group body. `current` is the flag set in
+/// effect at the `(`. Returns `None` for an unsupported `(?...)` construct
+/// (lookaround, an unsupported flag) so the whole pattern is rejected rather than
+/// silently mis-parsed.
 ///
 /// Capturing `(...)`, non-capturing `(?:...)` and named `(?P<name>...)` /
 /// `(?<name>...)` groups are all treated identically — this engine never extracts
-/// capture spans, so the name and capturing-ness are simply skipped.
-fn consume_group_prefix(iter: &mut std::str::Chars) -> Option<()> {
+/// capture spans, so the name and capturing-ness are simply skipped. Inline flags
+/// come in two shapes: a bare `(?flags)` directive and a scoped `(?flags:...)`
+/// group; both update the flags relative to `current`. See [`Flags`].
+fn consume_group_prefix(iter: &mut std::str::Chars, current: Flags) -> Option<GroupPrefix> {
     if iter.clone().next() != Some('?') {
-        return Some(());
+        // A plain capturing group inherits the surrounding flags.
+        return Some(GroupPrefix::Group(current));
     }
     iter.next(); // the '?'
-    match iter.next()? {
+    match iter.clone().next()? {
         // Non-capturing group: nothing more to skip.
-        ':' => Some(()),
+        ':' => {
+            iter.next();
+            Some(GroupPrefix::Group(current))
+        }
         // Python-style named group `(?P<name>...)`.
         'P' => {
+            iter.next();
             if iter.next()? != '<' {
                 return None;
             }
-            skip_until_gt(iter)
+            skip_until_gt(iter)?;
+            Some(GroupPrefix::Group(current))
         }
         // `(?<name>...)`; reject lookbehind `(?<=...)` / `(?<!...)` (unsupported).
-        '<' => match iter.clone().next() {
-            Some('=') | Some('!') => None,
-            _ => skip_until_gt(iter),
-        },
-        // Inline flags `(?i)`, `(?m:...)`, lookahead `(?=...)`, etc. are not supported.
-        _ => None,
+        '<' => {
+            iter.next();
+            match iter.clone().next() {
+                Some('=') | Some('!') => None,
+                _ => {
+                    skip_until_gt(iter)?;
+                    Some(GroupPrefix::Group(current))
+                }
+            }
+        }
+        // Lookahead `(?=...)` / `(?!...)` is unsupported.
+        '=' | '!' => None,
+        // An inline-flag spec: `i m s x U u`, optionally with a `-` to start
+        // clearing, terminated by `)` (a bare directive) or `:` (a scoped group).
+        _ => {
+            let mut flags = current;
+            let mut negate = false;
+            loop {
+                match iter.next()? {
+                    ')' => return Some(GroupPrefix::SetFlags(flags)),
+                    ':' => return Some(GroupPrefix::Group(flags)),
+                    '-' => negate = true,
+                    c => apply_flag(&mut flags, c, negate)?,
+                }
+            }
+        }
     }
 }
 
@@ -319,7 +450,7 @@ fn skip_until_gt(iter: &mut std::str::Chars) -> Option<()> {
 /// Parses one alternation: a run of `|`-separated branches. When `in_group` it
 /// stops at (and consumes) the matching `)`; otherwise it runs to end of input.
 /// Returns `None` on a malformed pattern (unclosed `(`, stray `)`, bad escape).
-fn parse_branches(iter: &mut std::str::Chars, in_group: bool) -> Option<Vec<Vec<AtomRepeat>>> {
+fn parse_branches(iter: &mut std::str::Chars, in_group: bool, mut flags: Flags) -> Option<Vec<Vec<AtomRepeat>>> {
     let mut branches: Vec<Vec<AtomRepeat>> = vec![];
     let mut atoms: Vec<AtomRepeat> = vec![];
     let mut escaped = false;
@@ -328,14 +459,15 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool) -> Option<Vec<Vec<
             '\\' if !escaped => {
                 escaped = true;
             }
-            '(' if !escaped => {
-                consume_group_prefix(iter)?;
-                atoms.push(AtomRepeat {
-                    atom: Atom::Alternation(parse_branches(iter, true)?),
+            '(' if !escaped => match consume_group_prefix(iter, flags)? {
+                // A bare `(?flags)` directive: apply to the rest of this group.
+                GroupPrefix::SetFlags(updated) => flags = updated,
+                GroupPrefix::Group(inner) => atoms.push(AtomRepeat {
+                    atom: Atom::Alternation(parse_branches(iter, true, inner)?),
                     repeat: Repeat::Once,
                     lazy: false,
-                });
-            }
+                }),
+            },
             ')' if !escaped => {
                 if !in_group {
                     // A `)` with no open group is malformed (matching the `regex` crate).
@@ -349,7 +481,7 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool) -> Option<Vec<Vec<
             }
             '[' if !escaped => {
                 atoms.push(AtomRepeat {
-                    atom: parse_group(iter)?,
+                    atom: parse_group(iter, flags)?,
                     repeat: Repeat::Once,
                     lazy: false,
                 });
@@ -358,7 +490,7 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool) -> Option<Vec<Vec<
                 Some(atom) => atoms.push(AtomRepeat {
                     atom,
                     repeat: Repeat::ZeroOrMore,
-                    lazy: consume_lazy(iter),
+                    lazy: consume_lazy(iter) != flags.swap_greedy,
                 }),
                 None => push_lit(&mut atoms, '*'),
             },
@@ -366,7 +498,7 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool) -> Option<Vec<Vec<
                 Some(atom) => atoms.push(AtomRepeat {
                     atom,
                     repeat: Repeat::OnceOrMore,
-                    lazy: consume_lazy(iter),
+                    lazy: consume_lazy(iter) != flags.swap_greedy,
                 }),
                 None => push_lit(&mut atoms, '+'),
             },
@@ -374,7 +506,7 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool) -> Option<Vec<Vec<
                 Some(atom) => atoms.push(AtomRepeat {
                     atom,
                     repeat: Repeat::ZeroOrOnce,
-                    lazy: consume_lazy(iter),
+                    lazy: consume_lazy(iter) != flags.swap_greedy,
                 }),
                 None => push_lit(&mut atoms, '?'),
             },
@@ -399,12 +531,14 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool) -> Option<Vec<Vec<
                         for _ in 0..spec.len() + 1 {
                             iter.next();
                         }
-                        // A trailing `?` (`{n,m}?`) makes the optional tail lazy. Peek
+                        // A trailing `?` (`{n,m}?`) flips the tail's greediness. Peek
                         // first and only consume it once the count actually binds, so a
-                        // literal-fallback brace leaves the `?` for normal parsing.
-                        let lazy = iter.clone().next() == Some('?');
+                        // literal-fallback brace leaves the `?` for normal parsing. Under
+                        // `(?U)` the default is already lazy, so the `?` un-flips it.
+                        let has_q = iter.clone().next() == Some('?');
+                        let lazy = has_q != flags.swap_greedy;
                         if apply_counted(&mut atoms, min, max, lazy) {
-                            if lazy {
+                            if has_q {
                                 iter.next();
                             }
                         } else {
@@ -426,11 +560,27 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool) -> Option<Vec<Vec<
                 lazy: false,
             }),
             '.' if !escaped => atoms.push(AtomRepeat {
-                // `.` matches any char except a newline, matching the `regex` crate.
-                atom: Atom::Group(true, vec![GroupEntry::Char('\n')]),
+                // `.` matches any char except a newline, matching the `regex` crate;
+                // under `(?s)` (dot-all) an inverted *empty* class matches everything.
+                atom: if flags.dot_matches_newline {
+                    Atom::Group(true, vec![])
+                } else {
+                    Atom::Group(true, vec![GroupEntry::Char('\n')])
+                },
                 repeat: Repeat::Once,
                 lazy: false,
             }),
+            // Verbose mode (`(?x)`): an unescaped `#` starts a line comment, and
+            // unescaped whitespace is layout. Neither applies inside `[...]`, which
+            // `parse_group` handles with its own loop.
+            '#' if flags.ignore_whitespace && !escaped => {
+                for ch in iter.by_ref() {
+                    if ch == '\n' {
+                        break;
+                    }
+                }
+            }
+            c if flags.ignore_whitespace && !escaped && c.is_whitespace() => {}
             c => {
                 if escaped {
                     escaped = false;
@@ -463,12 +613,12 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool) -> Option<Vec<Vec<
                                 repeat: Repeat::Once,
                                 lazy: false,
                             }),
-                            'x' | 'u' | 'U' => push_lit(&mut atoms, parse_hex_escape(c, iter)?),
-                            _ => push_lit(&mut atoms, escape_char(c)),
+                            'x' | 'u' | 'U' => push_char(&mut atoms, parse_hex_escape(c, iter)?, flags),
+                            _ => push_char(&mut atoms, escape_char(c), flags),
                         }
                     }
                 } else {
-                    push_lit(&mut atoms, c);
+                    push_char(&mut atoms, c, flags);
                 }
             }
         }
@@ -487,7 +637,7 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool) -> Option<Vec<Vec<
 impl SimpleRegexAst {
     pub fn parse(from: &str) -> Option<SimpleRegexAst> {
         let mut iter = from.chars();
-        let branches = parse_branches(&mut iter, false)?;
+        let branches = parse_branches(&mut iter, false, Flags::default())?;
         // A single branch stays a flat atom sequence (no wrapper); multiple
         // top-level branches become one alternation atom.
         let atoms = if branches.len() == 1 {
@@ -917,9 +1067,84 @@ mod tests {
     fn malformed_group_syntax_is_rejected() {
         assert!(SimpleRegexAst::parse("(abc").is_none()); // unclosed
         assert!(SimpleRegexAst::parse("abc)").is_none()); // stray close
-        assert!(SimpleRegexAst::parse("(?i)x").is_none()); // inline flags
         assert!(SimpleRegexAst::parse("(?=x)").is_none()); // lookahead
         assert!(SimpleRegexAst::parse("(?<=x)").is_none()); // lookbehind
+        assert!(SimpleRegexAst::parse("(?m)x").is_none()); // multiline: unmodellable
+        assert!(SimpleRegexAst::parse("(?R)x").is_none()); // CRLF: unmodellable
+        assert!(SimpleRegexAst::parse("(?Q)x").is_none()); // unknown flag
+        assert!(SimpleRegexAst::parse("(?ix").is_none()); // unterminated flag spec
+    }
+
+    #[test]
+    fn case_insensitive_literal_folds_both_cases() {
+        // `(?i)ab` -> each cased letter becomes a two-member group matching both cases.
+        let a = atoms("(?i)ab");
+        assert_eq!(a.len(), 2);
+        assert_group(&a[0], false, &[GroupEntry::Char('a'), GroupEntry::Char('A')]);
+        assert_group(&a[1], false, &[GroupEntry::Char('b'), GroupEntry::Char('B')]);
+        // A non-letter is left as a plain literal even under `(?i)`.
+        assert_lit(&atoms("(?i)5")[0], "5");
+    }
+
+    #[test]
+    fn case_insensitive_class_folds_chars_and_ranges() {
+        // `(?i)[a-c]` folds the range up to the matching uppercase range.
+        assert_group(&atoms("(?i)[a-c]")[0], false, &[GroupEntry::Range('a', 'c'), GroupEntry::Range('A', 'C')]);
+        // A single class member folds to both cases; non-letters are untouched.
+        assert_group(&atoms("(?i)[k_]")[0], false, &[GroupEntry::Char('k'), GroupEntry::Char('K'), GroupEntry::Char('_')]);
+        // Negation still applies after folding, so `(?i)[^a]` excludes both cases.
+        assert_group(&atoms("(?i)[^a]")[0], true, &[GroupEntry::Char('a'), GroupEntry::Char('A')]);
+    }
+
+    #[test]
+    fn scoped_flags_only_apply_inside_the_group() {
+        // `a(?i:b)c` -> `a` and `c` stay case-sensitive, only `b` folds.
+        let a = atoms("a(?i:b)c");
+        assert_lit(&a[0], "a");
+        let inner = branches(&a[1]);
+        assert_group(&inner[0][0], false, &[GroupEntry::Char('b'), GroupEntry::Char('B')]);
+        assert_lit(&a[2], "c");
+    }
+
+    #[test]
+    fn flags_can_be_cleared_with_a_dash() {
+        // `(?i)a(?-i)b` -> `a` folds, `b` does not.
+        let a = atoms("(?i)a(?-i)b");
+        assert_group(&a[0], false, &[GroupEntry::Char('a'), GroupEntry::Char('A')]);
+        assert_lit(&a[1], "b");
+    }
+
+    #[test]
+    fn dotall_flag_makes_dot_match_newline() {
+        // `(?s).` -> an inverted *empty* class (matches anything, including `\n`).
+        assert_group(&atoms("(?s).")[0], true, &[]);
+        // Without `(?s)`, `.` excludes `\n`.
+        assert_group(&atoms(".")[0], true, &[GroupEntry::Char('\n')]);
+    }
+
+    #[test]
+    fn unicode_flag_is_accepted_as_a_noop() {
+        // This engine is ASCII-only, so `u` toggles parse but change nothing.
+        assert_lit(&atoms("(?-u)ab")[0], "ab");
+        assert_lit(&atoms("(?u)ab")[0], "ab");
+    }
+
+    #[test]
+    fn swap_greedy_flag_flips_quantifier_defaults() {
+        // `(?U)a*` is lazy by default; the trailing `?` un-flips it back to greedy.
+        assert!(atoms("(?U)a*")[0].lazy);
+        assert!(!atoms("(?U)a*?")[0].lazy);
+        // The flip applies to a counted tail too.
+        assert!(atoms("(?U)a{1,2}").last().unwrap().lazy);
+    }
+
+    #[test]
+    fn verbose_flag_ignores_whitespace_and_comments() {
+        // `(?x)` drops unescaped whitespace and `#` line comments.
+        assert_lit(&atoms("(?x) a b c ")[0], "abc");
+        assert_lit(&atoms("(?x)ab # trailing comment\ncd")[0], "abcd");
+        // Escaped whitespace is still a literal space.
+        assert_lit(&atoms("(?x)a\\ b")[0], "a b");
     }
 
     #[test]

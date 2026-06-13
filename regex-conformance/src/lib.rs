@@ -29,6 +29,19 @@ mod compiled {
 }
 pub use compiled::compiled_lookup;
 
+/// The pattern string to feed the engine for `test`, with the corpus' test-level
+/// options folded into inline flags so they behave like the `regex` crate's
+/// builder switches. Currently this maps `case-insensitive = true` to a leading
+/// `(?i)` (the same global effect as `RegexBuilder::case_insensitive(true)`).
+///
+/// `build.rs` keeps a byte-for-byte copy of this (a build script can't depend on
+/// its own crate), so the compiled-engine matcher and the runtime interpreter
+/// parse the *same* effective pattern — keep the two in sync.
+pub fn effective_pattern(test: &RegexTest) -> String {
+    let pattern = &test.regexes()[0];
+    if test.case_insensitive() { format!("(?i){pattern}") } else { pattern.clone() }
+}
+
 /// The directory holding the TOML test corpus (`<workspace>/testdata`).
 pub fn testdata_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("testdata")
