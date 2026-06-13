@@ -76,12 +76,14 @@ impl SimpleRegex {
     /// remaining input — the same `(matched, remaining)` contract the generated
     /// (`generate_parser`) matcher produces.
     ///
-    /// This is a leftmost-longest match: it consumes greedily, remembers the byte
-    /// position of the last accepting state seen, and on a dead end (or end of
-    /// input) returns the match up to that remembered position. That last-accept
-    /// backoff is what lets `.*` and alternation pick the longest overall match
-    /// rather than committing to a branch that later fails — e.g. `/\*.*\*/` on
-    /// `/*a*/+` returns `/*a*/` instead of running off the end.
+    /// This is a leftmost-first match (like the `regex` crate): it follows the
+    /// highest-priority surviving thread, remembers the byte position of the last
+    /// accepting state seen, and on a dead end (or end of input) returns the match
+    /// up to that remembered position. The priority is baked into the DFA (see
+    /// `dfa.rs`): a greedy `.*` keeps consuming and backs off to the last accept
+    /// (`/\*.*\*/` spans to the last `*/`), while a lazy `.*?` or an earlier
+    /// alternation branch accepts first (`a|ab` on `"ab"` yields `"a"`), because the
+    /// accept-truncated DFA leaves no lower-priority consuming edge to follow.
     ///
     /// It mirrors the generated matcher exactly so the two engines stay in
     /// lock-step: consuming edges win over zero-width ones; `$`/`\z` only fires at
@@ -422,14 +424,41 @@ mod tests {
     }
 
     #[test]
-    fn alternation_prefers_the_longer_match() {
-        // This engine is greedy/leftmost-longest: a consuming edge always outranks
-        // accepting, so `a|ab` takes `ab` when both branches are viable. (This
-        // differs from the `regex` crate's leftmost-first `a` — see REGEX_PARITY.)
+    fn alternation_prefers_the_first_branch() {
+        // This engine is leftmost-first, like the `regex` crate: the earlier branch
+        // wins when both are viable, so `a|ab` takes `a` even though `ab` is longer.
         let re = SimpleRegex::parse("a|ab").unwrap();
-        assert_eq!(re.find_prefix("ab"), Some(("ab", "")));
-        // When only the short branch can complete, that one wins.
+        assert_eq!(re.find_prefix("ab"), Some(("a", "b")));
+        // Reordering the branches flips the result to the (now-first) longer branch.
+        assert_eq!(SimpleRegex::parse("ab|a").unwrap().find_prefix("ab"), Some(("ab", "")));
+        // When only the short branch can complete, that one wins regardless of order.
         assert_eq!(re.find_prefix("ac"), Some(("a", "c")));
+    }
+
+    #[test]
+    fn lazy_quantifiers_prefer_the_shorter_match() {
+        // `.*?` stops at the first place the rest of the pattern can match, unlike
+        // the greedy `.*` which runs to the last. Matches the `regex` crate.
+        let lazy = SimpleRegex::parse("a.*?b").unwrap();
+        assert_eq!(lazy.find_prefix("axbxb"), Some(("axb", "xb")));
+        let greedy = SimpleRegex::parse("a.*b").unwrap();
+        assert_eq!(greedy.find_prefix("axbxb"), Some(("axbxb", "")));
+
+        // `<.+?>` — the canonical "match one tag, not across tags" case.
+        let tag = SimpleRegex::parse("<.+?>").unwrap();
+        assert_eq!(tag.find_prefix("<a><b>"), Some(("<a>", "<b>")));
+
+        // Lazy `??` takes zero copies when the rest can still match.
+        let opt = SimpleRegex::parse("a??a").unwrap();
+        assert_eq!(opt.find_prefix("aa"), Some(("a", "a")));
+
+        // Lazy `+?` takes the minimum one copy.
+        let plus = SimpleRegex::parse("a+?").unwrap();
+        assert_eq!(plus.find_prefix("aaa"), Some(("a", "aa")));
+
+        // Lazy counted `{2,4}?` takes the two mandatory copies, no more.
+        let counted = SimpleRegex::parse("a{2,4}?").unwrap();
+        assert_eq!(counted.find_prefix("aaaa"), Some(("aa", "aa")));
     }
 
     #[test]

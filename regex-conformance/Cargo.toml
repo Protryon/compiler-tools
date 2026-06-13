@@ -13,9 +13,19 @@ compiler-tools-regex = { version = "0.2.0", path = "../compiler-tools-regex" }
 compiler-tools = { version = "0.2.0", path = "../compiler-tools" }
 regex-test = "0.1"
 
+[dev-dependencies]
+# The benchmark times the passing-test set across the two simple-regex engines
+# and the upstream `regex` crate (for comparison), driven by cargo-criterion.
+criterion = "0.5"
+regex = "1.12"
+
 [build-dependencies]
 # The build script uses the engine to code-generate one compiled matcher per test.
 compiler-tools-regex = { version = "0.2.0", path = "../compiler-tools-regex" }
 regex-test = "0.1"
 quote = "1.0"
 proc-macro2 = "1.0"
+
+[[bench]]
+name = "passing"
+harness = false

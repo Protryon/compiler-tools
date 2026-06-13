@@ -5,21 +5,28 @@ Tracking how the custom compile-time engine
 can close the gaps one at a time.
 
 Pipeline: `parse.rs` (pattern → AST) → `nfa.rs` (Thompson construction) → `dfa.rs`
-(real subset construction) → `generate.rs`. The AST is a `Vec<AtomRepeat>`, where an
-`Atom::Alternation(Vec<branch>)` holds nested sub-expressions, so groups and
+(priority-preserving subset construction) → `generate.rs`. The AST is a `Vec<AtomRepeat>`,
+where an `Atom::Alternation(Vec<branch>)` holds nested sub-expressions, so groups and
 alternation compose recursively. The matchers (`find_prefix` and the generated code)
-are leftmost-longest: consume greedily, remember the last accepting position, back off
-to it on a dead end.
+are **leftmost-first**, like the `regex` crate: each DFA state is a *priority-ordered*
+closure of NFA states truncated at the accepting state, so the matcher follows the
+highest-priority surviving thread, remembers the last accepting position, and backs off
+to it on a dead end. This is what makes greedy vs lazy quantifiers and alternation order
+match the `regex` crate (e.g. `a|ab` on `"ab"` → `"a"`).
 
 ## Supported today
 
 - Literal characters and `\`-escaping of metacharacters.
 - Character classes `[...]`, ranges (`a-z`), negation `[^...]`.
 - `.` — any char **except `\n`** (matches the `regex` crate default).
-- Quantifiers `*`, `+`, `?`.
-- Counted repetition `{n}`, `{n,}`, `{n,m}` — unrolled at parse time into the
-  existing repeat atoms (capped at `MAX_REPEAT = 1024`); a malformed/oversized
-  brace falls back to a literal `{`. See `apply_counted` / `parse_repeat_spec`.
+- Quantifiers `*`, `+`, `?`, both greedy and **lazy / non-greedy** (`*?`, `+?`, `??`,
+  `{n,m}?`). Laziness is an `AtomRepeat::lazy` flag set in `parse.rs` (`consume_lazy`)
+  that flips the priority of a split state's epsilon edges in `nfa.rs`; the
+  priority-ordered DFA then prefers the shorter match (`a.*?b`, `<.+?>`).
+- Counted repetition `{n}`, `{n,}`, `{n,m}` (and lazy `{n,m}?`) — unrolled at parse
+  time into the existing repeat atoms (capped at `MAX_REPEAT = 1024`); a
+  malformed/oversized brace falls back to a literal `{`. See `apply_counted` /
+  `parse_repeat_spec`.
 - Control-char escapes `\n \t \r \0 \f \v` decode to the real control character.
   See `escape_char`.
 - Perl shorthand classes `\d \D \w \W \s \S`, ASCII semantics (matching the
@@ -45,17 +52,15 @@ to it on a dead end.
   `Atom::Alternation`; the real subset construction in `dfa.rs` partitions consuming
   edges into disjoint classes with unioned targets, so shared-prefix alternation
   (`a|ab`, `(a|ab)z`) is deterministic and correct without backtracking. Matching is
-  leftmost-longest (greedy), like the `regex` crate — e.g. `/\*.*\*/` spans to the
-  *last* `*/`; use the classic `/\*([^*]|\*[^/])*\*/` to stop at the first.
+  **leftmost-first**, like the `regex` crate: the earlier branch wins when both are
+  viable (`a|ab` on `"ab"` → `"a"`), and greedy quantifiers still consume maximally —
+  e.g. `/\*.*\*/` spans to the *last* `*/`; use the classic `/\*([^*]|\*[^/])*\*/` or
+  the lazy `/\*.*?\*/` to stop at the first.
 - **Non-capturing / named groups** `(?:...)`, `(?P<name>...)`, `(?<name>...)` — all
   treated identically (this engine extracts no capture spans). See
   `consume_group_prefix`.
 
 ## Still missing
-
-### Quantifiers
-- [ ] **Lazy / non-greedy** — `*?`, `+?`, `??`, `{n,m}?`. A second quantifier is
-  currently consumed as a literal (see `double_repeat_treats_second_as_literal`).
 
 ### Anchors & boundaries
 - [ ] **Multiline / mid-pattern anchor semantics** — `^`/`$` as line anchors under
@@ -103,20 +108,22 @@ generated matcher stay in lock-step):
 | | runtime interpreter | compiled-rust engine |
 |---|---|---|
 | total | 1184 | 1184 |
-| pass | 568 | 568 |
+| pass | 590 | 590 |
 | fail-to-parse | 207 | 207 |
-| fail-to-pass | 340 | 340 |
+| fail-to-pass | 318 | 318 |
 | skipped | 69 | 69 |
-| per search | ~2.8 µs | ~1.7 µs |
+| per search | ~2.9 µs | ~1.6 µs |
 
-Adding alternation/grouping (and switching to a real subset construction with
-leftmost-longest matching) more than doubled the pass count (269 → 568) and roughly
-halved the fail-to-pass count. The flip side is that fail-to-parse rose (1 → 207):
-now that `(` / `)` / `|` are structural, patterns using unsupported group syntax
-(inline flags, lookaround) are explicitly rejected instead of silently mis-parsed as
-literals — a cleaner failure mode. The remaining fail-to-pass cases stem from the
-gaps above (lazy quantifiers, ASCII-only Unicode, no backtracking for boundaries).
-The `--nocapture` output lists every failing test name to make triage easy.
+Switching to a priority-preserving (leftmost-first) subset construction with lazy
+quantifier support raised the pass count 568 → 590 and dropped fail-to-pass 340 → 318,
+with no change to construction time (accept-truncation keeps the ordered-subset state
+space bounded). Earlier, adding alternation/grouping had already more than doubled the
+pass count (269 → 568). fail-to-parse stays at 207: now that `(` / `)` / `|` are
+structural, patterns using unsupported group syntax (inline flags, lookaround) are
+explicitly rejected instead of silently mis-parsed as literals — a cleaner failure
+mode. The remaining fail-to-pass cases stem from the gaps above (ASCII-only Unicode, no
+backtracking for boundaries). The `--nocapture` output lists every failing test name to
+make triage easy.
 
 ## Escape hatch
 

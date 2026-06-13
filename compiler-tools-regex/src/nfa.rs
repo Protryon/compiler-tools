@@ -58,10 +58,15 @@ pub struct Nfa {
 ///
 /// Every fragment is built between an existing `start` state and a freshly
 /// allocated `end` state that the builder returns, so a sequence chains by
-/// feeding one fragment's end in as the next fragment's start. Consuming edges
-/// are pushed onto `start` before any skip/loop epsilon, which keeps greedy
-/// quantifiers and earlier alternation branches first in declaration order — the
-/// subset construction in `dfa.rs` then makes the machine deterministic.
+/// feeding one fragment's end in as the next fragment's start.
+///
+/// Branching (`* + ?` repeats and alternation) routes through **pure-epsilon
+/// split states**: a split carries only epsilon edges, and every consuming state
+/// holds exactly one consuming edge. The *order* of a split's epsilon edges is its
+/// thread priority — the body/loop edge first for a greedy repeat, the skip/exit
+/// edge first for a lazy one (and earlier alternation branches before later ones).
+/// The priority-preserving subset construction in `dfa.rs` reads that order back
+/// out, which is what makes greedy-vs-lazy and leftmost-first alternation work.
 struct Builder {
     transitions: BTreeMap<u32, Vec<(TransitionEvent, u32)>>,
     next: u32,
@@ -90,28 +95,45 @@ impl Builder {
         current
     }
 
+    /// Wire a split state's two epsilon edges in priority order. A greedy repeat
+    /// prefers the body/loop (`first`) over the exit (`second`); a lazy repeat
+    /// flips them, so the leftmost-first matcher takes the shorter match.
+    fn split(&mut self, from: u32, first: u32, second: u32, lazy: bool) {
+        let (hi, lo) = if lazy { (second, first) } else { (first, second) };
+        self.edge(from, TransitionEvent::Epsilon, hi);
+        self.edge(from, TransitionEvent::Epsilon, lo);
+    }
+
     fn build_repeat(&mut self, atom: &AtomRepeat, start: u32) -> u32 {
+        let lazy = atom.lazy;
         match atom.repeat {
             Repeat::Once => self.build_atom(&atom.atom, start),
             Repeat::ZeroOrOnce => {
-                // Consuming body first, then a skip epsilon (greedy: prefer to match).
-                let end = self.build_atom(&atom.atom, start);
-                self.edge(start, TransitionEvent::Epsilon, end);
+                // `start` is a pure-epsilon split: body-or-skip. The body is built
+                // from a dedicated state so the split carries only epsilon edges.
+                let end = self.new_state();
+                let body_start = self.new_state();
+                self.split(start, body_start, end, lazy);
+                let body_end = self.build_atom(&atom.atom, body_start);
+                self.edge(body_end, TransitionEvent::Epsilon, end);
                 end
             }
             Repeat::ZeroOrMore => {
-                let body_end = self.build_atom(&atom.atom, start);
-                self.edge(body_end, TransitionEvent::Epsilon, start);
+                // `start` is the loop split: body-or-exit. The body loops back to the
+                // split, so re-entry re-reads the same priority order.
                 let end = self.new_state();
-                self.edge(start, TransitionEvent::Epsilon, end);
+                let body_start = self.new_state();
+                self.split(start, body_start, end, lazy);
+                let body_end = self.build_atom(&atom.atom, body_start);
+                self.edge(body_end, TransitionEvent::Epsilon, start);
                 end
             }
             Repeat::OnceOrMore => {
+                // Run the body once, then `body_end` becomes the loop split:
+                // loop-back (re-run the body) or exit.
                 let body_end = self.build_atom(&atom.atom, start);
                 let end = self.new_state();
-                // From the body's end, prefer looping back (consume more) over exiting.
-                self.edge(body_end, TransitionEvent::Epsilon, start);
-                self.edge(body_end, TransitionEvent::Epsilon, end);
+                self.split(body_end, start, end, lazy);
                 end
             }
         }
@@ -144,11 +166,15 @@ impl Builder {
                 end
             }
             Atom::Alternation(branches) => {
-                // Every branch leaves from the shared `start` (so its leading edges
-                // sit on `start` in declaration order) and merges into one `end`.
+                // `start` is a pure-epsilon split: one epsilon edge per branch, in
+                // declaration order (so earlier branches have higher priority for the
+                // leftmost-first matcher). Each branch is built from its own dedicated
+                // start state and merges into one `end`.
                 let end = self.new_state();
                 for branch in branches {
-                    let branch_end = self.build_sequence(branch, start);
+                    let branch_start = self.new_state();
+                    self.edge(start, TransitionEvent::Epsilon, branch_start);
+                    let branch_end = self.build_sequence(branch, branch_start);
                     self.edge(branch_end, TransitionEvent::Epsilon, end);
                 }
                 end
@@ -227,22 +253,47 @@ mod tests {
         }
     }
 
+    /// The epsilon targets leaving `state`, in stored (priority) order.
+    fn epsilon_targets(nfa: &Nfa, state: u32) -> Vec<u32> {
+        nfa.transitions
+            .get(&state)
+            .expect("state present")
+            .iter()
+            .filter_map(|(e, t)| matches!(e, TransitionEvent::Epsilon).then_some(*t))
+            .collect()
+    }
+
     #[test]
-    fn zero_or_more_adds_epsilon_skip_and_loops_back() {
-        // "a*" binds the star to the trailing char. The Thompson fragment has the
-        // start state offer the consuming body edge plus an epsilon skip to the
-        // final state, and the body's end loops back to the start via epsilon.
+    fn zero_or_more_is_a_pure_epsilon_split() {
+        // "a*" makes the start a pure-epsilon split: greedy order is body first, exit
+        // (the final state) second. The body consumes from its own dedicated state and
+        // loops back to the split. The priority order is what `dfa.rs` reads back out.
         let nfa = Nfa::build(&SimpleRegexAst::parse("a*").unwrap());
-        let start = nfa.transitions.get(&0).expect("start state present");
-        let (_, body) = start
+        let [body_start, exit] = epsilon_targets(&nfa, 0)[..] else {
+            panic!("start must be a split with two epsilon edges: {:?}", nfa.transitions.get(&0));
+        };
+        // Greedy: the body edge comes before the exit-to-final edge.
+        assert_eq!(exit, nfa.final_state, "second (lower-priority) edge exits to final");
+        let body = nfa.transitions.get(&body_start).expect("body start present");
+        let (_, body_end) = body
             .iter()
             .find(|(e, _)| matches!(e, TransitionEvent::Char('a')))
-            .expect("consuming body edge present");
+            .expect("body start holds the single consuming edge");
         assert!(
-            start.iter().any(|(e, t)| matches!(e, TransitionEvent::Epsilon) && *t == nfa.final_state),
-            "epsilon skip to final: {start:?}"
+            nfa.transitions
+                .get(body_end)
+                .expect("body end present")
+                .contains(&(TransitionEvent::Epsilon, 0)),
+            "body loops back to the split via epsilon",
         );
-        let body_trans = nfa.transitions.get(body).expect("body state present");
-        assert!(body_trans.contains(&(TransitionEvent::Epsilon, 0)), "body loops back to start via epsilon: {body_trans:?}");
+    }
+
+    #[test]
+    fn lazy_repeat_flips_split_priority() {
+        // "a*?" is the same machine with the split's two epsilon edges swapped: the
+        // exit (final state) now has higher priority than the body.
+        let nfa = Nfa::build(&SimpleRegexAst::parse("a*?").unwrap());
+        let targets = epsilon_targets(&nfa, 0);
+        assert_eq!(targets.first(), Some(&nfa.final_state), "lazy: exit-to-final is the higher-priority edge: {targets:?}");
     }
 }

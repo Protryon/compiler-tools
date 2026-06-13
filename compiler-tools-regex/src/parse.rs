@@ -145,9 +145,10 @@ fn extract_bindable(atoms: &mut Vec<AtomRepeat>) -> Option<Atom> {
 
 /// Applies a `{min,max}` count to the preceding atom by unrolling it: `min`
 /// mandatory copies, then either a `*` tail (`max == None`) or `max - min`
-/// optional copies. Returns `false` when there is no atom to bind to so the
-/// brace can be emitted literally.
-fn apply_counted(atoms: &mut Vec<AtomRepeat>, min: usize, max: Option<usize>) -> bool {
+/// optional copies. `lazy` marks the optional/star tail copies non-greedy
+/// (`{n,m}?`); the mandatory copies are always `Once`. Returns `false` when there
+/// is no atom to bind to so the brace can be emitted literally.
+fn apply_counted(atoms: &mut Vec<AtomRepeat>, min: usize, max: Option<usize>, lazy: bool) -> bool {
     let Some(atom) = extract_bindable(atoms) else {
         return false;
     };
@@ -155,23 +156,39 @@ fn apply_counted(atoms: &mut Vec<AtomRepeat>, min: usize, max: Option<usize>) ->
         atoms.push(AtomRepeat {
             atom: atom.clone(),
             repeat: Repeat::Once,
+            lazy: false,
         });
     }
     match max {
         None => atoms.push(AtomRepeat {
             atom: atom.clone(),
             repeat: Repeat::ZeroOrMore,
+            lazy,
         }),
         Some(max) => {
             for _ in min..max {
                 atoms.push(AtomRepeat {
                     atom: atom.clone(),
                     repeat: Repeat::ZeroOrOnce,
+                    lazy,
                 });
             }
         }
     }
     true
+}
+
+/// Peeks for a trailing `?` immediately after a quantifier and, if present,
+/// consumes it and reports the quantifier as lazy/non-greedy (`*?`, `+?`, `??`,
+/// `{n,m}?`). A `?` is only a lazy marker here; `*`/`+` after a quantifier still
+/// fall through to literals (`a**`), matching the existing behaviour.
+fn consume_lazy(iter: &mut std::str::Chars) -> bool {
+    if iter.clone().next() == Some('?') {
+        iter.next();
+        true
+    } else {
+        false
+    }
 }
 
 fn parse_group(iter: &mut impl Iterator<Item = char>) -> Option<Atom> {
@@ -244,6 +261,7 @@ fn push_lit(atoms: &mut Vec<AtomRepeat>, c: char) {
     if let Some(AtomRepeat {
         atom: Atom::Literal(literal),
         repeat: Repeat::Once,
+        ..
     }) = atoms.last_mut()
     {
         literal.push(c);
@@ -251,6 +269,7 @@ fn push_lit(atoms: &mut Vec<AtomRepeat>, c: char) {
         atoms.push(AtomRepeat {
             atom: Atom::Literal(c.to_string()),
             repeat: Repeat::Once,
+            lazy: false,
         });
     }
 }
@@ -314,6 +333,7 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool) -> Option<Vec<Vec<
                 atoms.push(AtomRepeat {
                     atom: Atom::Alternation(parse_branches(iter, true)?),
                     repeat: Repeat::Once,
+                    lazy: false,
                 });
             }
             ')' if !escaped => {
@@ -331,12 +351,14 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool) -> Option<Vec<Vec<
                 atoms.push(AtomRepeat {
                     atom: parse_group(iter)?,
                     repeat: Repeat::Once,
+                    lazy: false,
                 });
             }
             '*' if !escaped && !atoms.is_empty() => match extract_bindable(&mut atoms) {
                 Some(atom) => atoms.push(AtomRepeat {
                     atom,
                     repeat: Repeat::ZeroOrMore,
+                    lazy: consume_lazy(iter),
                 }),
                 None => push_lit(&mut atoms, '*'),
             },
@@ -344,6 +366,7 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool) -> Option<Vec<Vec<
                 Some(atom) => atoms.push(AtomRepeat {
                     atom,
                     repeat: Repeat::OnceOrMore,
+                    lazy: consume_lazy(iter),
                 }),
                 None => push_lit(&mut atoms, '+'),
             },
@@ -351,6 +374,7 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool) -> Option<Vec<Vec<
                 Some(atom) => atoms.push(AtomRepeat {
                     atom,
                     repeat: Repeat::ZeroOrOnce,
+                    lazy: consume_lazy(iter),
                 }),
                 None => push_lit(&mut atoms, '?'),
             },
@@ -375,7 +399,15 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool) -> Option<Vec<Vec<
                         for _ in 0..spec.len() + 1 {
                             iter.next();
                         }
-                        if !apply_counted(&mut atoms, min, max) {
+                        // A trailing `?` (`{n,m}?`) makes the optional tail lazy. Peek
+                        // first and only consume it once the count actually binds, so a
+                        // literal-fallback brace leaves the `?` for normal parsing.
+                        let lazy = iter.clone().next() == Some('?');
+                        if apply_counted(&mut atoms, min, max, lazy) {
+                            if lazy {
+                                iter.next();
+                            }
+                        } else {
                             push_lit(&mut atoms, '{');
                             spec.chars().for_each(|ch| push_lit(&mut atoms, ch));
                             push_lit(&mut atoms, '}');
@@ -391,11 +423,13 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool) -> Option<Vec<Vec<
             '$' if !escaped && iter.clone().next().is_none() => atoms.push(AtomRepeat {
                 atom: Atom::EndOfInput,
                 repeat: Repeat::Once,
+                lazy: false,
             }),
             '.' if !escaped => atoms.push(AtomRepeat {
                 // `.` matches any char except a newline, matching the `regex` crate.
                 atom: Atom::Group(true, vec![GroupEntry::Char('\n')]),
                 repeat: Repeat::Once,
+                lazy: false,
             }),
             c => {
                 if escaped {
@@ -404,6 +438,7 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool) -> Option<Vec<Vec<
                         atoms.push(AtomRepeat {
                             atom: Atom::Group(inverted, entries),
                             repeat: Repeat::Once,
+                            lazy: false,
                         });
                     } else {
                         match c {
@@ -415,15 +450,18 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool) -> Option<Vec<Vec<
                             'z' if iter.clone().next().is_none() => atoms.push(AtomRepeat {
                                 atom: Atom::EndOfInput,
                                 repeat: Repeat::Once,
+                                lazy: false,
                             }),
                             'z' => return None,
                             'b' => atoms.push(AtomRepeat {
                                 atom: Atom::WordBoundary(false),
                                 repeat: Repeat::Once,
+                                lazy: false,
                             }),
                             'B' => atoms.push(AtomRepeat {
                                 atom: Atom::WordBoundary(true),
                                 repeat: Repeat::Once,
+                                lazy: false,
                             }),
                             'x' | 'u' | 'U' => push_lit(&mut atoms, parse_hex_escape(c, iter)?),
                             _ => push_lit(&mut atoms, escape_char(c)),
@@ -458,6 +496,7 @@ impl SimpleRegexAst {
             vec![AtomRepeat {
                 atom: Atom::Alternation(branches),
                 repeat: Repeat::Once,
+                lazy: false,
             }]
         };
         Some(SimpleRegexAst {
@@ -564,6 +603,44 @@ mod tests {
         assert!(matches!(atoms[atoms.len() - 2].repeat, Repeat::ZeroOrMore));
         assert_lit(atoms.last().unwrap(), "*");
         assert!(matches!(atoms.last().unwrap().repeat, Repeat::Once));
+    }
+
+    #[test]
+    fn lazy_quantifiers_set_the_lazy_flag() {
+        // `*?`, `+?`, `??` mark the (single) repeat lazy and consume the `?`.
+        for (pattern, repeat) in [("a*?", Repeat::ZeroOrMore), ("a+?", Repeat::OnceOrMore), ("a??", Repeat::ZeroOrOnce)] {
+            let a = atoms(pattern);
+            assert_eq!(a.len(), 1, "{pattern}");
+            assert!(std::mem::discriminant(&a[0].repeat) == std::mem::discriminant(&repeat), "{pattern} repeat kind");
+            assert!(a[0].lazy, "{pattern} should be lazy");
+        }
+        // Greedy quantifiers leave `lazy` false.
+        assert!(!atoms("a*")[0].lazy);
+        assert!(!atoms("a+")[0].lazy);
+        assert!(!atoms("a?")[0].lazy);
+    }
+
+    #[test]
+    fn lazy_counted_marks_only_the_optional_tail() {
+        // `a{1,3}?` -> one mandatory (greedy `Once`), two lazy optional copies.
+        let a = atoms("a{1,3}?");
+        assert_eq!(a.len(), 3);
+        assert!(matches!(a[0].repeat, Repeat::Once) && !a[0].lazy);
+        assert!(matches!(a[1].repeat, Repeat::ZeroOrOnce) && a[1].lazy);
+        assert!(matches!(a[2].repeat, Repeat::ZeroOrOnce) && a[2].lazy);
+        // `a{2,}?` -> two mandatory then a lazy `*` tail.
+        let unbounded = atoms("a{2,}?");
+        assert!(matches!(unbounded[2].repeat, Repeat::ZeroOrMore) && unbounded[2].lazy);
+    }
+
+    #[test]
+    fn triple_question_leaves_third_literal() {
+        // `a??` is lazy `ZeroOrOnce`; a third `?` has nothing to re-quantify and is a
+        // literal char.
+        let a = atoms("a???");
+        assert!(matches!(a[0].repeat, Repeat::ZeroOrOnce) && a[0].lazy);
+        assert_lit(a.last().unwrap(), "?");
+        assert!(matches!(a.last().unwrap().repeat, Repeat::Once));
     }
 
     #[test]

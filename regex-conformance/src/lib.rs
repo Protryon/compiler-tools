@@ -14,10 +14,11 @@
 //! expected to fail or be skipped (unsupported syntax, byte/Unicode semantics),
 //! and that's fine — see the test crate for how results are summarized.
 
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
 pub use compiler_tools_regex::SimpleRegex;
-use regex_test::{Match, RegexTest, RegexTests, Span, TestResult};
+use regex_test::{CompiledRegex, Match, RegexTest, RegexTests, Span, TestResult, TestRunner, anyhow};
 
 // `compiled_lookup` plus one `compiled_<n>` matcher per supported test. The
 // generated matchers carry the usual dead-`prev`/dead-store warnings from
@@ -108,6 +109,30 @@ pub fn run_search(matcher: impl Fn(&str) -> Option<(&str, &str)>, test: &RegexTe
         }
     }
     TestResult::matches(matches)
+}
+
+/// Run a single test through `regex-test`'s comparator and report whether the
+/// engine passed it. `matcher` is the engine's anchored prefix matcher;
+/// [`run_search`] turns it into the leftmost search the corpus expects.
+///
+/// This is how the conformance harness and the criterion benchmark agree on
+/// which tests the engine "passes" — the benchmark times only the passing set.
+pub fn passes(test: &RegexTest, matcher: Box<dyn Fn(&str) -> Option<(&str, &str)>>) -> bool {
+    let mut runner = TestRunner::new().expect("failed to read REGEX_TEST env");
+    let mut matcher = Some(matcher);
+    runner.test(test, move |_patterns| {
+        let matcher = matcher.take().expect("compile called once per test");
+        Ok::<_, anyhow::Error>(CompiledRegex::compiled(move |test| run_search(|input| matcher(input), test)))
+    });
+
+    // `assert()` panics (with a large report) iff the single test failed. Silence
+    // the hook and treat a caught panic as "did not pass". The swap of the global
+    // panic hook is why callers must run this sequentially, not across threads.
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| runner.assert()));
+    std::panic::set_hook(previous_hook);
+    result.is_ok()
 }
 
 fn next_char_boundary(haystack: &str, mut pos: usize) -> usize {

@@ -139,9 +139,11 @@ impl SimpleRegex {
                 }
                 let mut counter = 0usize;
                 let mut state = 0u32;
-                // Leftmost-longest: remember the byte offset of the last accepting state,
-                // keep consuming greedily, and fall back to it on a dead end.
+                // Remember the byte offset of the last accepting state and fall back to
+                // it on a dead end.
                 let mut last: Option<usize> = None;
+                // Leftmost-first: priority is baked into the DFA, so following consuming
+                // edges and backing off to the last accept yields the regex-crate match.
                 // `prev`/`c` are the chars on either side of the current position; zero-width
                 // assertions inspect both without consuming, so the loop only advances `c`
                 // (and `counter`) on a consuming `Matched`.

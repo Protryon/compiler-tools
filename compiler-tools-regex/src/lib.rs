@@ -70,6 +70,11 @@ pub enum Atom {
 pub struct AtomRepeat {
     pub atom: Atom,
     pub repeat: Repeat,
+    /// Whether the repeat is lazy/non-greedy (`*?`, `+?`, `??`, and the optional
+    /// tail of a `{n,m}?`). Only meaningful when `repeat` is not [`Repeat::Once`];
+    /// it flips the priority of the skip/loop epsilon edges in the NFA so the
+    /// leftmost-first matcher prefers the *shorter* match. See `nfa::build_repeat`.
+    pub lazy: bool,
 }
 
 pub struct SimpleRegexAst {

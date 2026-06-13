@@ -3,6 +3,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use super::GroupEntry;
 use super::nfa::{Nfa, TransitionEvent};
 
+/// An ordered, de-duplicated set of NFA states — the key for a DFA state. The
+/// order is **thread priority** (highest first); see [`ordered_closure`].
+type Closure = Vec<u32>;
+
 /// The largest Unicode scalar value, used as the upper bound when complementing a
 /// character class (`[^...]`, `\D`, `.`).
 const MAX_CP: u32 = 0x10FFFF;
@@ -18,24 +22,44 @@ pub struct Dfa {
     pub final_state: u32,
 }
 
-/// Epsilon-closure of a set of NFA states: every state reachable by following
-/// only `Epsilon` edges. The result is the canonical key for a DFA state.
-fn epsilon_closure(nfa: &Nfa, seed: impl IntoIterator<Item = u32>) -> BTreeSet<u32> {
-    let mut set = BTreeSet::new();
-    let mut stack: Vec<u32> = seed.into_iter().collect();
+/// Priority-ordered epsilon-closure of an (ordered) seed of NFA states: every
+/// state reachable by following only `Epsilon` edges, listed in **thread
+/// priority** order. This is a pre-order DFS that visits each state's epsilon
+/// successors in their stored edge order (which `nfa.rs` arranges as
+/// greedy-body-before-exit / earlier-branch-before-later), de-duplicating so the
+/// highest-priority occurrence of each state wins. It replaces the old unordered
+/// `BTreeSet` closure and is what makes the DFA leftmost-first.
+///
+/// **Accept-truncation**: as soon as the NFA accepting state (`final_state`) is
+/// reached, the closure stops — every still-pending (lower-priority) thread is
+/// cut. This is the heart of first-match semantics: once a higher-priority thread
+/// has matched, lower-priority continuations can never be preferred, so dropping
+/// them is both correct and what keeps the ordered-subset state space finite.
+fn ordered_closure(nfa: &Nfa, seed: &[u32], final_state: u32) -> Closure {
+    let mut out: Closure = vec![];
+    let mut seen: HashSet<u32> = HashSet::new();
+    // Pre-order DFS with an explicit stack (avoids recursion blowups on large
+    // unrolled `{n}` machines). Successors are pushed in reverse so they pop in
+    // stored order; the whole seed is pushed reversed for the same reason.
+    let mut stack: Vec<u32> = seed.iter().rev().copied().collect();
     while let Some(state) = stack.pop() {
-        if !set.insert(state) {
+        if !seen.insert(state) {
             continue;
         }
+        out.push(state);
+        if state == final_state {
+            // Cut lower-priority threads still on the stack.
+            break;
+        }
         if let Some(transitions) = nfa.transitions.get(&state) {
-            for (event, target) in transitions {
-                if matches!(event, TransitionEvent::Epsilon) && !set.contains(target) {
+            for (event, target) in transitions.iter().rev() {
+                if matches!(event, TransitionEvent::Epsilon) {
                     stack.push(*target);
                 }
             }
         }
     }
-    set
+    out
 }
 
 /// Sorts and merges a list of inclusive codepoint ranges into disjoint, ordered
@@ -129,10 +153,12 @@ fn ranges_to_event(ranges: &[(u32, u32)]) -> TransitionEvent {
 }
 
 /// Partitions the consuming edges leaving a DFA state into disjoint character
-/// classes. Each returned entry maps the set of NFA target states reached on that
+/// classes. `edges` must be in **priority order** (closure order). Each returned
+/// entry maps the *ordered, de-duplicated* list of NFA target states reached on a
 /// class to the (merged) ranges that reach it, so the resulting transitions are
-/// truly deterministic — a single character lands in exactly one class.
-fn partition(edges: &[(Ranges, u32)]) -> Vec<(BTreeSet<u32>, Ranges)> {
+/// deterministic (a character lands in exactly one class) while preserving the
+/// priority of overlapping edges (a higher-priority source's target comes first).
+fn partition(edges: &[(Ranges, u32)]) -> Vec<(Closure, Ranges)> {
     // The sweep boundaries: every range start, and every range end + 1.
     let mut points: BTreeSet<u32> = BTreeSet::new();
     for (ranges, _) in edges {
@@ -145,39 +171,51 @@ fn partition(edges: &[(Ranges, u32)]) -> Vec<(BTreeSet<u32>, Ranges)> {
     }
     let points: Vec<u32> = points.into_iter().collect();
 
-    let mut groups: HashMap<BTreeSet<u32>, Vec<(u32, u32)>> = HashMap::new();
+    // Group elementary intervals by their ordered target list. `index` maps a
+    // target list to its slot in `groups` so identical lists merge; `groups` keeps
+    // first-encounter order for deterministic output.
+    let mut index: HashMap<Closure, usize> = HashMap::new();
+    let mut groups: Vec<(Closure, Ranges)> = vec![];
     for (i, &lo) in points.iter().enumerate() {
         let hi = points.get(i + 1).map(|next| next - 1).unwrap_or(MAX_CP);
-        // Every codepoint in [lo, hi] belongs to the same set of edges, so probing
-        // `lo` is enough to decide membership for the whole elementary interval.
-        let targets: BTreeSet<u32> = edges
-            .iter()
-            .filter(|(ranges, _)| ranges.iter().any(|(a, b)| *a <= lo && lo <= *b))
-            .map(|(_, target)| *target)
-            .collect();
-        if !targets.is_empty() {
-            groups.entry(targets).or_default().push((lo, hi));
+        // Every codepoint in [lo, hi] belongs to the same edges, so probing `lo`
+        // decides membership for the whole elementary interval. Walk edges in
+        // priority order, keeping the first occurrence of each target.
+        let mut targets: Closure = vec![];
+        for (ranges, target) in edges {
+            if ranges.iter().any(|(a, b)| *a <= lo && lo <= *b) && !targets.contains(target) {
+                targets.push(*target);
+            }
+        }
+        if targets.is_empty() {
+            continue;
+        }
+        match index.get(&targets) {
+            Some(&slot) => groups[slot].1.push((lo, hi)),
+            None => {
+                index.insert(targets.clone(), groups.len());
+                groups.push((targets, vec![(lo, hi)]));
+            }
         }
     }
 
+    for (_, ranges) in &mut groups {
+        normalize(ranges);
+    }
     groups
-        .into_iter()
-        .map(|(targets, mut ranges)| {
-            normalize(&mut ranges);
-            (targets, ranges)
-        })
-        .collect()
 }
 
-/// Interns NFA-state sets to small, stable DFA state ids. The start set is
-/// interned first so it gets id 0 (the matcher always begins at state 0).
+/// Interns ordered NFA-state closures to small, stable DFA state ids. The start
+/// closure is interned first so it gets id 0 (the matcher always begins at state
+/// 0). Two closures with the same states in a *different* order are distinct DFA
+/// states, because the order is thread priority and can change the match.
 struct Interner {
-    ids: HashMap<BTreeSet<u32>, u32>,
+    ids: HashMap<Closure, u32>,
     next: u32,
 }
 
 impl Interner {
-    fn intern(&mut self, set: &BTreeSet<u32>) -> u32 {
+    fn intern(&mut self, set: &Closure) -> u32 {
         if let Some(id) = self.ids.get(set) {
             return *id;
         }
@@ -189,26 +227,31 @@ impl Interner {
 }
 
 impl Dfa {
-    /// Classic subset construction. Each DFA state is the epsilon-closure of a set
-    /// of NFA states; consuming edges are partitioned into disjoint classes whose
-    /// targets are unioned, which is what makes alternation and shared-prefix
-    /// groups (`a|ab`, `(a|ab)z`) match correctly without backtracking.
+    /// Priority-preserving subset construction. Each DFA state is an
+    /// [`ordered_closure`] of NFA states (highest priority first, truncated at the
+    /// accepting state); consuming edges are partitioned into disjoint classes whose
+    /// ordered targets are unioned, which makes alternation and shared-prefix groups
+    /// (`a|ab`, `(a|ab)z`) deterministic *and* leftmost-first — the higher-priority
+    /// branch's continuation comes first, so greedy/lazy quantifiers and alternation
+    /// order match the `regex` crate.
     ///
     /// Zero-width assertions (`$`/`\z` and `\b`/`\B`) stay as their own transitions
     /// to a follow-on state, exactly as the generated matcher and the runtime
     /// interpreter expect: they are evaluated against the input position without
     /// consuming. The single NFA accepting state is collapsed to a transition-less
-    /// sink (`final_state`); any DFA state whose set contains it emits an `End`
-    /// edge so the matcher can accept there while still preferring to consume
-    /// (greedy / leftmost-longest).
+    /// sink (`final_state`); any DFA state whose closure contains it emits an `End`
+    /// edge. Because the closure is truncated at the accept, any consuming edge still
+    /// present is higher priority than that accept, so the matcher's "prefer to
+    /// consume" rule is exactly leftmost-first (greedy keeps going; a lazy or
+    /// preferred-empty path has no surviving consuming edge and accepts immediately).
     pub fn build(nfa: &Nfa) -> Self {
-        let final_singleton: BTreeSet<u32> = std::iter::once(nfa.final_state).collect();
+        let final_singleton: Closure = vec![nfa.final_state];
         let mut interner = Interner {
             ids: HashMap::new(),
             next: 0,
         };
 
-        let start = epsilon_closure(nfa, [0]);
+        let start = ordered_closure(nfa, &[0], nfa.final_state);
         interner.intern(&start); // id 0
         let final_state = interner.intern(&final_singleton);
 
@@ -217,27 +260,28 @@ impl Dfa {
         let mut worklist = vec![start];
         while let Some(set) = worklist.pop() {
             let id = interner.intern(&set);
-            // The accepting set is a transition-less sink; the rest are built once.
+            // The accepting closure is a transition-less sink; the rest are built once.
             if set == final_singleton || !processed.insert(id) {
                 continue;
             }
 
-            // Gather the non-epsilon edges leaving the closure.
+            // Gather the non-epsilon edges leaving the closure, in priority order.
             let mut consuming: Vec<(Ranges, u32)> = vec![];
-            let mut end_of_input: BTreeSet<u32> = BTreeSet::new();
-            let mut boundaries: [BTreeSet<u32>; 2] = [BTreeSet::new(), BTreeSet::new()];
+            let mut end_of_input: Closure = vec![];
+            let mut boundaries: [Closure; 2] = [vec![], vec![]];
+            let push_unique = |targets: &mut Closure, target: u32| {
+                if !targets.contains(&target) {
+                    targets.push(target);
+                }
+            };
             for state in &set {
                 let Some(state_transitions) = nfa.transitions.get(state) else { continue };
                 for (event, target) in state_transitions {
                     match event {
                         TransitionEvent::Epsilon => {}
                         TransitionEvent::Char(_) | TransitionEvent::Chars(..) => consuming.push((event_ranges(event), *target)),
-                        TransitionEvent::EndOfInput => {
-                            end_of_input.insert(*target);
-                        }
-                        TransitionEvent::WordBoundary(negate) => {
-                            boundaries[*negate as usize].insert(*target);
-                        }
+                        TransitionEvent::EndOfInput => push_unique(&mut end_of_input, *target),
+                        TransitionEvent::WordBoundary(negate) => push_unique(&mut boundaries[*negate as usize], *target),
                         // The NFA never stores an explicit `End` edge.
                         TransitionEvent::End => {}
                     }
@@ -245,14 +289,14 @@ impl Dfa {
             }
 
             let mut out: Vec<(TransitionEvent, u32)> = vec![];
-            let wire = |targets: BTreeSet<u32>, interner: &mut Interner, worklist: &mut Vec<BTreeSet<u32>>| -> u32 {
-                let closed = epsilon_closure(nfa, targets);
+            let wire = |targets: Closure, interner: &mut Interner, worklist: &mut Vec<Closure>| -> u32 {
+                let closed = ordered_closure(nfa, &targets, nfa.final_state);
                 let target_id = interner.intern(&closed);
                 worklist.push(closed);
                 target_id
             };
 
-            // Deterministic consuming transitions.
+            // Deterministic consuming transitions (ordered targets preserve priority).
             for (targets, ranges) in partition(&consuming) {
                 let target_id = wire(targets, &mut interner, &mut worklist);
                 out.push((ranges_to_event(&ranges), target_id));
@@ -269,8 +313,10 @@ impl Dfa {
                     out.push((TransitionEvent::WordBoundary(negate), target_id));
                 }
             }
-            // Accepting state: offer an `End` edge to the sink (greedy: consuming
-            // edges above are tried first).
+            // Accepting closure: offer an `End` edge to the sink. Truncation
+            // guarantees any consuming edge above outranks this accept, so trying
+            // them first is leftmost-first (greedy); a lazy/empty-preferred state has
+            // no surviving consuming edge and accepts here immediately.
             if set.contains(&nfa.final_state) {
                 out.push((TransitionEvent::End, final_state));
             }
@@ -360,6 +406,46 @@ mod tests {
         let dfa = build("[a-z]*x");
         assert_total(&dfa);
         assert_disjoint_consuming(&dfa);
+    }
+
+    fn consuming_edges(state: &[(TransitionEvent, u32)]) -> usize {
+        state
+            .iter()
+            .filter(|(e, _)| matches!(e, TransitionEvent::Char(_) | TransitionEvent::Chars(..)))
+            .count()
+    }
+
+    fn has_end(state: &[(TransitionEvent, u32)]) -> bool {
+        state.iter().any(|(e, _)| matches!(e, TransitionEvent::End))
+    }
+
+    #[test]
+    fn lazy_star_accepts_without_consuming() {
+        // `a*?` truncates the consuming thread behind the higher-priority accept, so
+        // the start state accepts immediately and offers no consuming edge.
+        let dfa = build("a*?");
+        let start = &dfa.transitions[&0];
+        assert!(has_end(start), "lazy start accepts");
+        assert_eq!(consuming_edges(start), 0, "lazy start has no surviving consuming edge");
+        // The greedy form keeps the consuming edge (and also accepts).
+        let greedy = build("a*");
+        let gstart = &greedy.transitions[&0];
+        assert!(has_end(gstart));
+        assert_eq!(consuming_edges(gstart), 1, "greedy start still consumes");
+    }
+
+    #[test]
+    fn leftmost_first_alternation_cuts_the_longer_branch() {
+        // `a|ab`: consuming `a` lands in an accepting state with no `b` edge — the
+        // second branch's continuation is cut once the first branch matched.
+        let dfa = build("a|ab");
+        let (_, after_a) = dfa.transitions[&0]
+            .iter()
+            .find(|(e, _)| matches!(e, TransitionEvent::Char('a')))
+            .expect("start consumes a");
+        let state = &dfa.transitions[after_a];
+        assert!(has_end(state), "first branch accepts after `a`");
+        assert_eq!(consuming_edges(state), 0, "the `b` of the second branch was cut");
     }
 
     #[test]
