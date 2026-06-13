@@ -31,7 +31,7 @@ use std::hint::black_box;
 struct Case<'a> {
     test: &'a RegexTest,
     simple: SimpleRegex,
-    compiled: fn(&str) -> Option<(&str, &str)>,
+    compiled: fn(&str, Option<char>) -> Option<(&str, &str)>,
     full: regex::Regex,
 }
 
@@ -56,7 +56,7 @@ fn select(corpus: &RegexTests) -> Vec<Case<'_>> {
             // fresh `SimpleRegex` for the check since the one we store is borrowed by
             // `find_prefix` and `SimpleRegex` isn't `Clone`.
             let check = SimpleRegex::parse(pattern)?;
-            if !passes(test, Box::new(move |input| check.find_prefix(input))) {
+            if !passes(test, Box::new(move |input, prev| check.find_prefix(input, prev))) {
                 return None;
             }
 
@@ -82,7 +82,7 @@ fn bench_passing(c: &mut Criterion) {
     group.bench_function("simple-runtime", |b| {
         b.iter(|| {
             for case in &cases {
-                black_box(run_search(|input| case.simple.find_prefix(input), case.test));
+                black_box(run_search(|input, prev| case.simple.find_prefix(input, prev), case.test));
             }
         });
     });
@@ -90,7 +90,7 @@ fn bench_passing(c: &mut Criterion) {
     group.bench_function("simple-compiled", |b| {
         b.iter(|| {
             for case in &cases {
-                black_box(run_search(|input| (case.compiled)(input), case.test));
+                black_box(run_search(|input, prev| (case.compiled)(input, prev), case.test));
             }
         });
     });
@@ -98,7 +98,7 @@ fn bench_passing(c: &mut Criterion) {
     group.bench_function("regex-crate", |b| {
         b.iter(|| {
             for case in &cases {
-                black_box(run_search(|input| case.full.find(input).map(|m| (m.as_str(), &input[m.end()..])), case.test));
+                black_box(run_search(|input, _prev| case.full.find(input).map(|m| (m.as_str(), &input[m.end()..])), case.test));
             }
         });
     });

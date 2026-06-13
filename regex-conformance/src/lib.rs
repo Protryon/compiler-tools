@@ -29,6 +29,12 @@ mod compiled {
 }
 pub use compiled::compiled_lookup;
 
+/// A boxed anchored prefix matcher: `(slice, preceding char) -> (matched, rest)`.
+/// The preceding char seeds the zero-width assertions (`^` under `(?m)`, `\b`) so a
+/// slice taken mid-haystack still sees the right context. Both engines (the runtime
+/// interpreter and the generated matcher) are wrapped in this shape.
+pub type BoxedMatcher = Box<dyn Fn(&str, Option<char>) -> Option<(&str, &str)>>;
+
 /// The pattern string to feed the engine for `test`, with the corpus' test-level
 /// options folded into inline flags so they behave like the `regex` crate's
 /// builder switches. Currently this maps `case-insensitive = true` to a leading
@@ -81,7 +87,7 @@ fn collect_toml(dir: &Path, out: &mut Vec<PathBuf>) {
 ///
 /// Tests whose haystack isn't valid UTF-8 (this engine is `&str`-based) are
 /// skipped rather than failed.
-pub fn run_search(matcher: impl Fn(&str) -> Option<(&str, &str)>, test: &RegexTest) -> TestResult {
+pub fn run_search(matcher: impl Fn(&str, Option<char>) -> Option<(&str, &str)>, test: &RegexTest) -> TestResult {
     let Ok(haystack) = std::str::from_utf8(test.haystack()) else {
         return TestResult::skip();
     };
@@ -97,7 +103,11 @@ pub fn run_search(matcher: impl Fn(&str) -> Option<(&str, &str)>, test: &RegexTe
             continue;
         }
         let end = bounds.end.min(haystack.len());
-        match matcher(&haystack[pos..end]) {
+        // The char immediately before `pos`, so zero-width assertions in the matcher
+        // (`^` under `(?m)`, `\b`) see the right preceding context for a mid-haystack
+        // slice instead of treating every start position as start-of-text.
+        let prev = haystack[..pos].chars().next_back();
+        match matcher(&haystack[pos..end], prev) {
             Some((matched, _)) => {
                 let match_end = pos + matched.len();
                 matches.push(Match {
@@ -130,12 +140,12 @@ pub fn run_search(matcher: impl Fn(&str) -> Option<(&str, &str)>, test: &RegexTe
 ///
 /// This is how the conformance harness and the criterion benchmark agree on
 /// which tests the engine "passes" — the benchmark times only the passing set.
-pub fn passes(test: &RegexTest, matcher: Box<dyn Fn(&str) -> Option<(&str, &str)>>) -> bool {
+pub fn passes(test: &RegexTest, matcher: BoxedMatcher) -> bool {
     let mut runner = TestRunner::new().expect("failed to read REGEX_TEST env");
     let mut matcher = Some(matcher);
     runner.test(test, move |_patterns| {
         let matcher = matcher.take().expect("compile called once per test");
-        Ok::<_, anyhow::Error>(CompiledRegex::compiled(move |test| run_search(|input| matcher(input), test)))
+        Ok::<_, anyhow::Error>(CompiledRegex::compiled(move |test| run_search(|input, prev| matcher(input, prev), test)))
     });
 
     // `assert()` panics (with a large report) iff the single test failed. Silence

@@ -11,18 +11,20 @@ impl SimpleRegex {
         for (state, transitions) in &self.dfa.transitions {
             let state_fn = format_ident!("state_{}", state);
             // Consuming edges become `match target` arms. `End` only marks the state
-            // accepting; the zero-width moves (`$`/`\z` and word boundaries) become a
-            // `None` arm and a `prev`-aware fallback respectively.
+            // accepting; the zero-width moves (`$`/`\z`, `^`/`$` line anchors and word
+            // boundaries) are collected in stored (priority) order and emitted as a
+            // single `prev`/lookahead-aware catch-all arm.
             let mut consuming_matches = vec![];
-            let mut end_of_input: Option<u32> = None;
-            let mut boundaries: Vec<(bool, u32)> = vec![];
+            let mut zero_width: Vec<(&nfa::TransitionEvent, u32)> = vec![];
             let mut is_accepting = false;
             for (transition, target) in transitions {
                 match transition {
                     nfa::TransitionEvent::Epsilon => unreachable!(),
                     nfa::TransitionEvent::End => is_accepting = true,
-                    nfa::TransitionEvent::WordBoundary(negate) => boundaries.push((*negate, *target)),
-                    nfa::TransitionEvent::EndOfInput => end_of_input = Some(*target),
+                    nfa::TransitionEvent::WordBoundary(_)
+                    | nfa::TransitionEvent::EndOfInput
+                    | nfa::TransitionEvent::EndOfLine
+                    | nfa::TransitionEvent::StartOfLine => zero_width.push((transition, *target)),
                     nfa::TransitionEvent::Char(c) => consuming_matches.push(quote! { Some(#c) => ::compiler_tools::MatchResult::Matched(#target), }),
                     nfa::TransitionEvent::Chars(inverted, group) => {
                         let mut matching = vec![];
@@ -66,44 +68,58 @@ impl SimpleRegex {
             }
             let consuming_matches = flatten(consuming_matches);
 
-            // A trailing `$`/`\z` accepts at end of input by moving (zero-width) on the
-            // `None` lookahead; word boundaries move when the boundary holds for the
-            // current `prev`/lookahead pair. Both are evaluated only when no consuming
-            // edge claimed the character.
-            let none_arm = match end_of_input {
-                Some(target) => quote! { None => ::compiler_tools::MatchResult::MatchedEmpty(#target), },
-                None => quote! {},
-            };
-            let (uses_prev, fallback) = if boundaries.is_empty() {
-                (false, quote! { #none_arm _ => ::compiler_tools::MatchResult::NoMatch, })
+            // The zero-width moves are evaluated only when no consuming edge claimed
+            // the lookahead char (`other`), in stored priority order:
+            //   * `$`/`\z` (`EndOfInput`) accepts only at end of input;
+            //   * `$` under `(?m)` (`EndOfLine`) at end of input or before a `\n`;
+            //   * `^` under `(?m)` (`StartOfLine`) at start of input or after a `\n`
+            //     (tested against `prev`, independent of the lookahead);
+            //   * `\b`/`\B` (`WordBoundary`) when the boundary holds for `prev`/`other`.
+            // `^`/`\b` consult `prev`; word boundaries also need the `is_word` helper.
+            let uses_prev = zero_width
+                .iter()
+                .any(|(e, _)| matches!(e, nfa::TransitionEvent::StartOfLine | nfa::TransitionEvent::WordBoundary(_)));
+            let needs_is_word = zero_width.iter().any(|(e, _)| matches!(e, nfa::TransitionEvent::WordBoundary(_)));
+            let fallback = if zero_width.is_empty() {
+                quote! { _ => ::compiler_tools::MatchResult::NoMatch, }
             } else {
                 let mut chain = quote! { ::compiler_tools::MatchResult::NoMatch };
-                for (negate, target) in boundaries.iter().rev() {
-                    let cmp = if *negate {
-                        quote! { == }
-                    } else {
-                        quote! { != }
+                for (event, target) in zero_width.iter().rev() {
+                    let cond = match event {
+                        nfa::TransitionEvent::EndOfInput => quote! { other.is_none() },
+                        nfa::TransitionEvent::EndOfLine => quote! { matches!(other, None | Some('\n')) },
+                        nfa::TransitionEvent::StartOfLine => quote! { matches!(prev, None | Some('\n')) },
+                        nfa::TransitionEvent::WordBoundary(negate) => {
+                            let cmp = if *negate {
+                                quote! { == }
+                            } else {
+                                quote! { != }
+                            };
+                            quote! { is_word(prev) #cmp is_word(other) }
+                        }
+                        _ => unreachable!(),
                     };
                     chain = quote! {
-                        if is_word(prev) #cmp is_word(other) {
+                        if #cond {
                             ::compiler_tools::MatchResult::MatchedEmpty(#target)
                         } else {
                             #chain
                         }
                     };
                 }
-                (
-                    true,
+                let is_word_fn = needs_is_word.then(|| {
                     quote! {
-                        #none_arm
-                        other => {
-                            fn is_word(ch: Option<char>) -> bool {
-                                matches!(ch, Some('0'..='9' | 'a'..='z' | 'A'..='Z' | '_'))
-                            }
-                            #chain
+                        fn is_word(ch: Option<char>) -> bool {
+                            matches!(ch, Some('0'..='9' | 'a'..='z' | 'A'..='Z' | '_'))
                         }
-                    },
-                )
+                    }
+                });
+                quote! {
+                    other => {
+                        #is_word_fn
+                        #chain
+                    }
+                }
             };
             let prev_param = if uses_prev {
                 quote! { prev }
@@ -131,7 +147,11 @@ impl SimpleRegex {
         accepting_states.push(quote! { #final_state });
         let zero_width_limit = self.dfa.transitions.len() + 1;
         quote! {
-            fn #fn_name(from: &str) -> Option<(&str, &str)> {
+            // `prev` is the char immediately before `from` in the larger input (the
+            // caller supplies it; `None` means start of text). It seeds the zero-width
+            // assertions — `^` under `(?m)` and `\b` — so a slice taken mid-input still
+            // sees the correct preceding context.
+            fn #fn_name(from: &str, prev_in: Option<char>) -> Option<(&str, &str)> {
                 #state_fns
                 #[inline]
                 fn is_accepting(state: u32) -> bool {
@@ -147,7 +167,7 @@ impl SimpleRegex {
                 // `prev`/`c` are the chars on either side of the current position; zero-width
                 // assertions inspect both without consuming, so the loop only advances `c`
                 // (and `counter`) on a consuming `Matched`.
-                let mut prev: Option<char> = None;
+                let mut prev: Option<char> = prev_in;
                 let mut chars = from.chars();
                 let mut c = chars.next();
                 let mut zero_width = 0usize;

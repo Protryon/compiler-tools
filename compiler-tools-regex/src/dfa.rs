@@ -268,6 +268,8 @@ impl Dfa {
             // Gather the non-epsilon edges leaving the closure, in priority order.
             let mut consuming: Vec<(Ranges, u32)> = vec![];
             let mut end_of_input: Closure = vec![];
+            let mut end_of_line: Closure = vec![];
+            let mut start_of_line: Closure = vec![];
             let mut boundaries: [Closure; 2] = [vec![], vec![]];
             let push_unique = |targets: &mut Closure, target: u32| {
                 if !targets.contains(&target) {
@@ -281,6 +283,8 @@ impl Dfa {
                         TransitionEvent::Epsilon => {}
                         TransitionEvent::Char(_) | TransitionEvent::Chars(..) => consuming.push((event_ranges(event), *target)),
                         TransitionEvent::EndOfInput => push_unique(&mut end_of_input, *target),
+                        TransitionEvent::EndOfLine => push_unique(&mut end_of_line, *target),
+                        TransitionEvent::StartOfLine => push_unique(&mut start_of_line, *target),
                         TransitionEvent::WordBoundary(negate) => push_unique(&mut boundaries[*negate as usize], *target),
                         // The NFA never stores an explicit `End` edge.
                         TransitionEvent::End => {}
@@ -301,10 +305,20 @@ impl Dfa {
                 let target_id = wire(targets, &mut interner, &mut worklist);
                 out.push((ranges_to_event(&ranges), target_id));
             }
-            // Zero-width assertions: each kind collapses to one follow-on state.
+            // Zero-width assertions: each kind collapses to one follow-on state. The
+            // emission order here is the priority the matcher loop reads back (both
+            // engines iterate transitions in this stored order).
             if !end_of_input.is_empty() {
                 let target_id = wire(end_of_input, &mut interner, &mut worklist);
                 out.push((TransitionEvent::EndOfInput, target_id));
+            }
+            if !end_of_line.is_empty() {
+                let target_id = wire(end_of_line, &mut interner, &mut worklist);
+                out.push((TransitionEvent::EndOfLine, target_id));
+            }
+            if !start_of_line.is_empty() {
+                let target_id = wire(start_of_line, &mut interner, &mut worklist);
+                out.push((TransitionEvent::StartOfLine, target_id));
             }
             for negate in [false, true] {
                 let targets = std::mem::take(&mut boundaries[negate as usize]);

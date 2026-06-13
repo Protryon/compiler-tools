@@ -11,9 +11,11 @@ const MAX_REPEAT: usize = 1024;
 ///
 /// The `u` (Unicode) flag is accepted but ignored — this engine is ASCII-only, so
 /// `(?-u)` is already its native behaviour and `(?u)` cannot upgrade it. The `m`
-/// (multiline) and `R` (CRLF) flags are *rejected* (the pattern fails to parse):
-/// they retarget `^`/`$`/`.` to line boundaries, which a context-free prefix
-/// matcher with no view across its input edge cannot model.
+/// (multiline) flag retargets `^`/`$` to `\n` line boundaries, modeled as the
+/// zero-width [`Atom::StartOfLine`]/[`Atom::EndOfLine`] assertions (the matcher
+/// loop evaluates them against the surrounding chars, like `\b`). The `R` (CRLF)
+/// flag is still *rejected* — it would need `\r\n` treated as a single line
+/// terminator, which this `\n`-only model can't yet represent.
 #[derive(Clone, Copy, Default)]
 struct Flags {
     /// `i` — ASCII case-insensitive. A cased literal/class member matches both cases.
@@ -25,11 +27,14 @@ struct Flags {
     /// `U` — swap-greedy: the default greediness of every quantifier is flipped, so
     /// a trailing `?` un-flips it again.
     swap_greedy: bool,
+    /// `m` — multiline: `^`/`$` match at `\n` line boundaries (not just the input
+    /// edges), lowered to [`Atom::StartOfLine`]/[`Atom::EndOfLine`].
+    multiline: bool,
 }
 
 /// Applies one flag letter to `flags`, setting it when `negate` is false and
-/// clearing it after a `-`. Returns `None` for an unsupported flag (`m`, `R`) or
-/// an unknown letter so the whole pattern is rejected rather than mis-parsed.
+/// clearing it after a `-`. Returns `None` for an unsupported flag (`R`) or an
+/// unknown letter so the whole pattern is rejected rather than mis-parsed.
 fn apply_flag(flags: &mut Flags, c: char, negate: bool) -> Option<()> {
     let value = !negate;
     match c {
@@ -37,9 +42,10 @@ fn apply_flag(flags: &mut Flags, c: char, negate: bool) -> Option<()> {
         's' => flags.dot_matches_newline = value,
         'x' => flags.ignore_whitespace = value,
         'U' => flags.swap_greedy = value,
+        'm' => flags.multiline = value,
         // `u` (Unicode) is a no-op: this engine is ASCII-only either way.
         'u' => {}
-        // `m` (multiline) and `R` (CRLF) can't be modeled by a prefix matcher.
+        // `R` (CRLF) needs `\r\n` treated as one line terminator — not yet modeled.
         _ => return None,
     }
     Some(())
@@ -208,7 +214,7 @@ fn extract_bindable(atoms: &mut Vec<AtomRepeat>) -> Option<Atom> {
             Some(Atom::Literal(c.to_string()))
         }
         Atom::Group(..) | Atom::Alternation(..) => Some(atoms.pop().unwrap().atom),
-        Atom::EndOfInput | Atom::WordBoundary(_) => None,
+        Atom::EndOfInput | Atom::WordBoundary(_) | Atom::StartOfLine | Atom::EndOfLine => None,
     }
 }
 
@@ -551,6 +557,19 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool, mut flags: Flags) 
                     None => push_lit(&mut atoms, '{'),
                 }
             }
+            // Under `(?m)`, `^`/`$` are line anchors anywhere in the pattern; lower
+            // them to zero-width assertions the matcher loop evaluates against the
+            // surrounding chars. These arms must precede the non-multiline ones below.
+            '^' if !escaped && flags.multiline => atoms.push(AtomRepeat {
+                atom: Atom::StartOfLine,
+                repeat: Repeat::Once,
+                lazy: false,
+            }),
+            '$' if !escaped && flags.multiline => atoms.push(AtomRepeat {
+                atom: Atom::EndOfLine,
+                repeat: Repeat::Once,
+                lazy: false,
+            }),
             '^' if !escaped && atoms.is_empty() => {
                 // Leading start-of-input anchor: a no-op for a prefix matcher.
             }
@@ -906,6 +925,23 @@ mod tests {
     }
 
     #[test]
+    fn multiline_flag_makes_caret_and_dollar_line_anchors() {
+        // Under `(?m)`, `^`/`$` become zero-width line anchors anywhere in the pattern.
+        let a = atoms("(?m)^a$");
+        assert!(matches!(a.first().unwrap().atom, Atom::StartOfLine));
+        assert!(matches!(a.last().unwrap().atom, Atom::EndOfLine));
+        // A non-leading/non-trailing anchor is still a line anchor under `(?m)`.
+        let mid = atoms("(?m)$a");
+        assert!(matches!(mid.first().unwrap().atom, Atom::EndOfLine));
+        let mid = atoms("(?m)a^b");
+        assert!(matches!(mid[1].atom, Atom::StartOfLine));
+        // Without `(?m)`, behaviour is unchanged: leading `^` dropped, trailing `$`
+        // is end-of-input, and a mid-pattern anchor stays literal.
+        assert!(matches!(atoms("^a$").last().unwrap().atom, Atom::EndOfInput));
+        assert_lit(&atoms("a^b")[0], "a^b");
+    }
+
+    #[test]
     fn trailing_dollar_is_end_anchor() {
         let a = atoms("ab$");
         assert!(matches!(a.last().unwrap().atom, Atom::EndOfInput));
@@ -1069,7 +1105,6 @@ mod tests {
         assert!(SimpleRegexAst::parse("abc)").is_none()); // stray close
         assert!(SimpleRegexAst::parse("(?=x)").is_none()); // lookahead
         assert!(SimpleRegexAst::parse("(?<=x)").is_none()); // lookbehind
-        assert!(SimpleRegexAst::parse("(?m)x").is_none()); // multiline: unmodellable
         assert!(SimpleRegexAst::parse("(?R)x").is_none()); // CRLF: unmodellable
         assert!(SimpleRegexAst::parse("(?Q)x").is_none()); // unknown flag
         assert!(SimpleRegexAst::parse("(?ix").is_none()); // unterminated flag spec

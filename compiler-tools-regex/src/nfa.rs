@@ -12,6 +12,12 @@ pub enum TransitionEvent {
     EndOfInput,
     /// Zero-width word-boundary assertion (`\b` / `\B`); the bool negates it.
     WordBoundary(bool),
+    /// Zero-width multiline start-of-line assertion (`^` under `(?m)`): taken at the
+    /// start of input or immediately after a `\n`.
+    StartOfLine,
+    /// Zero-width multiline end-of-line assertion (`$` under `(?m)`): taken at the
+    /// end of input or immediately before a `\n`.
+    EndOfLine,
     End,
 }
 
@@ -38,7 +44,7 @@ impl TransitionEvent {
                 *inverted
             }
             // A zero-width assertion never consumes a character.
-            TransitionEvent::EndOfInput | TransitionEvent::WordBoundary(_) => false,
+            TransitionEvent::EndOfInput | TransitionEvent::WordBoundary(_) | TransitionEvent::StartOfLine | TransitionEvent::EndOfLine => false,
             TransitionEvent::End => true,
         }
     }
@@ -163,6 +169,16 @@ impl Builder {
             Atom::WordBoundary(negate) => {
                 let end = self.new_state();
                 self.edge(start, TransitionEvent::WordBoundary(*negate), end);
+                end
+            }
+            Atom::StartOfLine => {
+                let end = self.new_state();
+                self.edge(start, TransitionEvent::StartOfLine, end);
+                end
+            }
+            Atom::EndOfLine => {
+                let end = self.new_state();
+                self.edge(start, TransitionEvent::EndOfLine, end);
                 end
             }
             Atom::Alternation(branches) => {

@@ -16,7 +16,7 @@ fn atoms_could_capture_newline(atoms: &[AtomRepeat]) -> bool {
             entries_contain_newline != *inverted
         }
         // Zero-width assertions consume nothing.
-        Atom::EndOfInput | Atom::WordBoundary(_) => false,
+        Atom::EndOfInput | Atom::WordBoundary(_) | Atom::StartOfLine | Atom::EndOfLine => false,
         Atom::Alternation(branches) => branches.iter().any(|branch| atoms_could_capture_newline(branch)),
     })
 }
@@ -91,12 +91,15 @@ impl SimpleRegex {
     /// consuming; and an `End` edge marks a state accepting (it never moves). The
     /// match is anchored at the start of `from`; callers search by advancing the
     /// start position themselves.
+    /// `prev` is the char immediately before `from` in the larger input (`None` for
+    /// start of text); it seeds the zero-width assertions (`^` under `(?m)`, `\b`) so
+    /// a slice taken mid-input still sees the correct preceding context.
     #[allow(dead_code)] // exercised by the conformance unit tests, not the macro itself
-    pub fn find_prefix<'a>(&self, from: &'a str) -> Option<(&'a str, &'a str)> {
+    pub fn find_prefix<'a>(&self, from: &'a str, prev: Option<char>) -> Option<(&'a str, &'a str)> {
         let mut counter = 0usize;
         let mut state = 0u32;
         let mut last: Option<usize> = None;
-        let mut prev: Option<char> = None;
+        let mut prev: Option<char> = prev;
         let mut chars = from.chars();
         let mut c = chars.next();
         // A bound on consecutive zero-width moves; more than one per state would
@@ -147,8 +150,9 @@ fn is_word(ch: Option<char>) -> bool {
 
 /// Evaluate one DFA state for the runtime interpreter, matching the priority the
 /// generated matcher uses: consuming edges (in declaration order) first, then the
-/// zero-width moves — `$`/`\z` at end of input and word boundaries tested against
-/// `prev`/`c`. `End` edges are *not* moves; acceptance is handled by `accepts`.
+/// zero-width moves in stored order — `$`/`\z` at end of input, `$`/`^` under `(?m)`
+/// at `\n` line boundaries, and word boundaries tested against `prev`/`c`. `End`
+/// edges are *not* moves; acceptance is handled by `accepts`.
 #[allow(dead_code)]
 fn eval_state(transitions: &[(super::nfa::TransitionEvent, u32)], prev: Option<char>, c: Option<char>) -> Step {
     use super::nfa::TransitionEvent;
@@ -170,20 +174,20 @@ fn eval_state(transitions: &[(super::nfa::TransitionEvent, u32)], prev: Option<c
                     }
                 }
             }
-            TransitionEvent::EndOfInput => {
-                if c.is_none() {
-                    return Step::MatchedEmpty(*target);
-                }
-            }
             _ => {}
         }
     }
+    // Zero-width assertions, only when no consuming edge claimed `c`, in stored order.
     for (transition, target) in transitions {
-        if let TransitionEvent::WordBoundary(negate) = transition {
-            let boundary = is_word(prev) != is_word(c);
-            if boundary != *negate {
-                return Step::MatchedEmpty(*target);
-            }
+        let holds = match transition {
+            TransitionEvent::EndOfInput => c.is_none(),
+            TransitionEvent::EndOfLine => matches!(c, None | Some('\n')),
+            TransitionEvent::StartOfLine => matches!(prev, None | Some('\n')),
+            TransitionEvent::WordBoundary(negate) => (is_word(prev) != is_word(c)) != *negate,
+            _ => false,
+        };
+        if holds {
+            return Step::MatchedEmpty(*target);
         }
     }
     Step::NoMatch
@@ -428,11 +432,11 @@ mod tests {
         // This engine is leftmost-first, like the `regex` crate: the earlier branch
         // wins when both are viable, so `a|ab` takes `a` even though `ab` is longer.
         let re = SimpleRegex::parse("a|ab").unwrap();
-        assert_eq!(re.find_prefix("ab"), Some(("a", "b")));
+        assert_eq!(re.find_prefix("ab", None), Some(("a", "b")));
         // Reordering the branches flips the result to the (now-first) longer branch.
-        assert_eq!(SimpleRegex::parse("ab|a").unwrap().find_prefix("ab"), Some(("ab", "")));
+        assert_eq!(SimpleRegex::parse("ab|a").unwrap().find_prefix("ab", None), Some(("ab", "")));
         // When only the short branch can complete, that one wins regardless of order.
-        assert_eq!(re.find_prefix("ac"), Some(("a", "c")));
+        assert_eq!(re.find_prefix("ac", None), Some(("a", "c")));
     }
 
     #[test]
@@ -440,33 +444,33 @@ mod tests {
         // `.*?` stops at the first place the rest of the pattern can match, unlike
         // the greedy `.*` which runs to the last. Matches the `regex` crate.
         let lazy = SimpleRegex::parse("a.*?b").unwrap();
-        assert_eq!(lazy.find_prefix("axbxb"), Some(("axb", "xb")));
+        assert_eq!(lazy.find_prefix("axbxb", None), Some(("axb", "xb")));
         let greedy = SimpleRegex::parse("a.*b").unwrap();
-        assert_eq!(greedy.find_prefix("axbxb"), Some(("axbxb", "")));
+        assert_eq!(greedy.find_prefix("axbxb", None), Some(("axbxb", "")));
 
         // `<.+?>` — the canonical "match one tag, not across tags" case.
         let tag = SimpleRegex::parse("<.+?>").unwrap();
-        assert_eq!(tag.find_prefix("<a><b>"), Some(("<a>", "<b>")));
+        assert_eq!(tag.find_prefix("<a><b>", None), Some(("<a>", "<b>")));
 
         // Lazy `??` takes zero copies when the rest can still match.
         let opt = SimpleRegex::parse("a??a").unwrap();
-        assert_eq!(opt.find_prefix("aa"), Some(("a", "a")));
+        assert_eq!(opt.find_prefix("aa", None), Some(("a", "a")));
 
         // Lazy `+?` takes the minimum one copy.
         let plus = SimpleRegex::parse("a+?").unwrap();
-        assert_eq!(plus.find_prefix("aaa"), Some(("a", "aa")));
+        assert_eq!(plus.find_prefix("aaa", None), Some(("a", "aa")));
 
         // Lazy counted `{2,4}?` takes the two mandatory copies, no more.
         let counted = SimpleRegex::parse("a{2,4}?").unwrap();
-        assert_eq!(counted.find_prefix("aaaa"), Some(("aa", "aa")));
+        assert_eq!(counted.find_prefix("aaaa", None), Some(("aa", "aa")));
     }
 
     #[test]
     fn group_with_alternation_finds_longest_required_suffix() {
         // The trailing `z` forces the longer branch when the short one can't complete.
         let re = SimpleRegex::parse("(a|ab)z").unwrap();
-        assert_eq!(re.find_prefix("abz"), Some(("abz", "")));
-        assert_eq!(re.find_prefix("az"), Some(("az", "")));
+        assert_eq!(re.find_prefix("abz", None), Some(("abz", "")));
+        assert_eq!(re.find_prefix("az", None), Some(("az", "")));
     }
 
     #[test]
@@ -476,27 +480,42 @@ mod tests {
         assert!(SimpleRegex::parse("abc)").is_none());
         assert!(SimpleRegex::parse("(?=foo)").is_none());
         assert!(SimpleRegex::parse("(?<=foo)bar").is_none());
-        assert!(SimpleRegex::parse("(?m)foo").is_none()); // multiline
+        assert!(SimpleRegex::parse("(?R)foo").is_none()); // CRLF: still unmodellable
+    }
+
+    #[test]
+    fn multiline_anchors_match_line_boundaries() {
+        // `^` under `(?m)` holds at start of text or just after a `\n` (seeded by the
+        // `prev` argument); `$` holds at end of text or just before a `\n`.
+        let re = SimpleRegex::parse("(?m)^[a-z]+$").unwrap();
+        // Anchored at the start of the slice: prev = None counts as a line start.
+        assert_eq!(re.find_prefix("abc\ndef", None), Some(("abc", "\ndef")));
+        // Mid-input slice whose preceding char is the `\n`: `^` still holds.
+        assert_eq!(re.find_prefix("def", Some('\n')), Some(("def", "")));
+        // Same slice but preceded by a letter (mid-line): `^` must NOT hold.
+        assert_eq!(re.find_prefix("def", Some('x')), None);
+        // `$` fires before a `\n` even when more input follows.
+        assert_eq!(SimpleRegex::parse("(?m)[a-z]+$").unwrap().find_prefix("abc\nxyz", None), Some(("abc", "\nxyz")));
     }
 
     #[test]
     fn case_insensitive_flag_matches_either_case() {
         let re = SimpleRegex::parse("(?i)foo").unwrap();
-        assert_eq!(re.find_prefix("FoObar"), Some(("FoO", "bar")));
-        assert_eq!(re.find_prefix("FOO"), Some(("FOO", "")));
-        assert_eq!(re.find_prefix("bar"), None);
+        assert_eq!(re.find_prefix("FoObar", None), Some(("FoO", "bar")));
+        assert_eq!(re.find_prefix("FOO", None), Some(("FOO", "")));
+        assert_eq!(re.find_prefix("bar", None), None);
         // Scoped form only folds the group body.
         let scoped = SimpleRegex::parse("a(?i:b)c").unwrap();
-        assert_eq!(scoped.find_prefix("aBc"), Some(("aBc", "")));
-        assert_eq!(scoped.find_prefix("Abc"), None);
+        assert_eq!(scoped.find_prefix("aBc", None), Some(("aBc", "")));
+        assert_eq!(scoped.find_prefix("Abc", None), None);
     }
 
     #[test]
     fn dotall_flag_matches_newline() {
         let re = SimpleRegex::parse("(?s)a.b").unwrap();
-        assert_eq!(re.find_prefix("a\nb"), Some(("a\nb", "")));
+        assert_eq!(re.find_prefix("a\nb", None), Some(("a\nb", "")));
         // Without the flag, `.` will not cross a newline.
-        assert_eq!(SimpleRegex::parse("a.b").unwrap().find_prefix("a\nb"), None);
+        assert_eq!(SimpleRegex::parse("a.b").unwrap().find_prefix("a\nb", None), None);
     }
 
     #[test]

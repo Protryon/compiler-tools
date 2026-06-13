@@ -66,7 +66,7 @@ fn main() {
         };
         fns.push(parser);
         let name = test.full_name();
-        entries.push(quote! { (#name, #ident as fn(&str) -> Option<(&str, &str)>), });
+        entries.push(quote! { (#name, #ident as fn(&str, Option<char>) -> Option<(&str, &str)>), });
     }
 
     std::panic::set_hook(prev_hook);
@@ -78,8 +78,8 @@ fn main() {
 
         /// Returns the compiled-engine matcher generated for the test with the
         /// given full name, or `None` if its pattern was unsupported.
-        pub fn compiled_lookup(full_name: &str) -> Option<fn(&str) -> Option<(&str, &str)>> {
-            const TABLE: &[(&str, fn(&str) -> Option<(&str, &str)>)] = &[ #entries ];
+        pub fn compiled_lookup(full_name: &str) -> Option<fn(&str, Option<char>) -> Option<(&str, &str)>> {
+            const TABLE: &[(&str, fn(&str, Option<char>) -> Option<(&str, &str)>)] = &[ #entries ];
             TABLE.iter().copied().find(|(name, _)| *name == full_name).map(|(_, f)| f)
         }
     };

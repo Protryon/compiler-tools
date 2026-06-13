@@ -57,6 +57,14 @@ pub enum Atom {
     /// characters differ (`\b`) or match (`\B`); the edges of the input count as
     /// non-word. Consumes nothing.
     WordBoundary(bool),
+    /// A zero-width multiline start-of-line assertion: `^` under `(?m)`. Holds at
+    /// the start of the input or immediately after a `\n`. Only emitted when the
+    /// multiline flag is set; otherwise a leading `^` is dropped (see `parse.rs`).
+    StartOfLine,
+    /// A zero-width multiline end-of-line assertion: `$` under `(?m)`. Holds at the
+    /// end of the input or immediately before a `\n`. Only emitted when the
+    /// multiline flag is set; otherwise a trailing `$` lowers to [`Atom::EndOfInput`].
+    EndOfLine,
     /// A parenthesised sub-expression with alternation: `(a|bc|d)`. Each inner
     /// `Vec<AtomRepeat>` is one `|`-separated branch (a sequence of atoms); a plain
     /// group `(...)` is just an alternation with a single branch. Capturing,

@@ -18,7 +18,7 @@
 
 use std::time::{Duration, Instant};
 
-use regex_conformance::{SimpleRegex, compiled_lookup, effective_pattern, load_corpus, passes, run_search};
+use regex_conformance::{BoxedMatcher, SimpleRegex, compiled_lookup, effective_pattern, load_corpus, passes, run_search};
 use regex_test::{RegexTest, RegexTests};
 
 /// What an engine could do with a given test before we try to run it.
@@ -27,8 +27,9 @@ enum Prepared {
     Skip,
     /// The engine's parser rejected the pattern.
     FailToParse,
-    /// A ready-to-run anchored prefix matcher for the (single) pattern.
-    Run(Box<dyn Fn(&str) -> Option<(&str, &str)>>),
+    /// A ready-to-run anchored prefix matcher for the (single) pattern. The second
+    /// argument is the char preceding the slice (for `^`/`\b` context).
+    Run(BoxedMatcher),
 }
 
 struct Summary {
@@ -131,7 +132,7 @@ fn conformance_summary() {
             return Prepared::Skip; // regex sets are out of scope for this engine
         };
         match SimpleRegex::parse(&effective_pattern(test)) {
-            Some(regex) => Prepared::Run(Box::new(move |input| regex.find_prefix(input))),
+            Some(regex) => Prepared::Run(Box::new(move |input, prev| regex.find_prefix(input, prev))),
             None => Prepared::FailToParse,
         }
     });
@@ -146,7 +147,7 @@ fn conformance_summary() {
             return Prepared::FailToParse;
         }
         match compiled_lookup(test.full_name()) {
-            Some(matcher) => Prepared::Run(Box::new(move |input| matcher(input))),
+            Some(matcher) => Prepared::Run(Box::new(move |input, prev| matcher(input, prev))),
             None => Prepared::FailToParse,
         }
     });

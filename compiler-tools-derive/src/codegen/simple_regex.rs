@@ -74,7 +74,9 @@ pub(crate) fn gen_simple_regex(
             parse_fns.entry(token_index).or_default().push(quote! {
                 {
                     #parse_fn
-                    if let Some((passed, remaining)) = #fn_ident(self.inner) {
+                    // The tokenizer anchors each match at the current position, treated
+                    // as start of text/line, so no preceding char is threaded through.
+                    if let Some((passed, remaining)) = #fn_ident(self.inner, None) {
                         let span = #span;
                         self.inner = remaining;
                         match passed {

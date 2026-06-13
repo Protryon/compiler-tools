@@ -38,6 +38,16 @@ match the `regex` crate (e.g. `a|ab` on `"ab"` → `"a"`).
   `Atom::EndOfInput` zero-width assertion (`TransitionEvent::EndOfInput`, only taken
   at EOF). A literal `^`/`$` elsewhere stays literal; a `\A`/`\z` elsewhere is rejected
   (it can never hold).
+- **Multiline anchors** `^`/`$` under `(?m)`: lowered to the zero-width
+  `Atom::StartOfLine` / `Atom::EndOfLine` assertions, which can appear anywhere in the
+  pattern (`(?m)^[a-z]+$`, `(?m)$\n^`). `^` holds at the start of input or just after a
+  `\n`; `$` at the end of input or just before a `\n`. Like `\b`, they are evaluated in
+  the matcher loop against the surrounding chars. To know whether a *mid-input* slice
+  begins at a line boundary, the matcher takes a `prev: Option<char>` argument (the char
+  before the slice; `None` = start of text); the conformance search supplies the real
+  preceding char, and the generated tokenizer passes `None` (each token match is
+  anchored at its start). Line terminator is `\n` only — `(?R)` CRLF mode is still
+  rejected. Threading `prev` also fixes `\b` at a non-zero search offset.
 - Word boundaries `\b` / `\B` (ASCII `[0-9A-Za-z_]` word-ness, input edges count as
   non-word). Lowered to `Atom::WordBoundary` / `TransitionEvent::WordBoundary`,
   evaluated against the previous and lookahead chars in the matcher loop. The matcher
@@ -71,6 +81,8 @@ match the `regex` crate (e.g. `a|ab` on `"ab"` → `"a"`).
     (neither applies inside `[...]`); `\ ` is still a literal space.
   - `U` — swap-greedy: every quantifier's default greediness is flipped, so a trailing
     `?` un-flips it (`(?U)a*` is lazy, `(?U)a*?` greedy).
+  - `m` — multiline: `^`/`$` become the `\n` line anchors described above
+    (`Atom::StartOfLine` / `Atom::EndOfLine`).
   - `u` — Unicode toggle, accepted as a **no-op** (this engine is ASCII-only, so `(?-u)`
     is already its native mode and `(?u)` can't upgrade it). This is what lets the
     many `(?-u:...)` no-unicode patterns parse.
@@ -79,9 +91,10 @@ match the `regex` crate (e.g. `a|ab` on `"ab"` → `"a"`).
 ## Still missing
 
 ### Anchors & boundaries
-- [ ] **Multiline / mid-pattern anchor semantics** — `^`/`$` as line anchors under
-  `(?m)`. Only the leading-`^`/trailing-`$` (start/end of haystack) cases are modeled;
-  a prefix matcher has no line context. `\A`, `\z`, `\b`, `\B` are done.
+- [x] **Multiline anchors** — `^`/`$` as `\n` line anchors under `(?m)`. Done (the
+  matcher takes the preceding char so a mid-input slice knows its line context).
+- [ ] **CRLF line terminator** — `(?R)`, which treats `\r\n` as a single line
+  terminator for `^`/`$`/`.`. Still rejected; the line-anchor model is `\n`-only.
 
 ### Character-class shorthands
 - [ ] **Negated shorthands inside a class** — e.g. `[\D]`, `[a\W]`. Currently
@@ -94,10 +107,9 @@ match the `regex` crate (e.g. `a|ab` on `"ab"` → `"a"`).
 
 ### Escapes & flags
 - [ ] **Octal escapes** — `\123`, `\o{...}`. (Hex/codepoint escapes are supported.)
-- [ ] **Multiline / CRLF flags** — `(?m)` and `(?R)`. These retarget `^`/`$`/`.` to
-  line boundaries, which a context-free prefix matcher with no view across its input
-  edge can't model, so a pattern using either flag is *rejected* at parse time (a hard
-  `compile_error!`). `(?i) (?s) (?x) (?U) (?u)` are supported — see above.
+- [ ] **CRLF flag** — `(?R)`. Retargets `^`/`$`/`.` to `\r\n` line boundaries; still
+  *rejected* at parse time (a hard `compile_error!`) because the line-anchor model is
+  `\n`-only. `(?i) (?m) (?s) (?x) (?U) (?u)` are supported — see above.
 
 ## Not a gap (the `regex` crate doesn't support these either)
 
@@ -129,22 +141,86 @@ generated matcher stay in lock-step):
 | | runtime interpreter | compiled-rust engine |
 |---|---|---|
 | total | 1184 | 1184 |
-| pass | 622 | 622 |
-| fail-to-parse | 161 | 161 |
-| fail-to-pass | 328 | 328 |
-| skipped | 73 | 73 |
-| per search | ~2.7 µs | ~1.6 µs |
+| pass | 682 | 682 |
+| fail-to-parse | 109 | 109 |
+| fail-to-pass | 319 | 319 |
+| skipped | 74 | 74 |
+| per search | ~3.2 µs | ~2.5 µs |
 
-Adding inline flags (`(?imsxU)` directives and scoped groups) plus the harness'
-`case-insensitive` → `(?i)` folding raised the pass count 590 → 622 and dropped
+Adding `(?m)` multiline line anchors (`^`/`$` as zero-width `\n` boundaries) and
+threading the preceding char into the matcher raised the pass count 622 → 682 and
+dropped fail-to-parse 161 → 109. fail-to-pass also fell (328 → 319): the `prev` argument
+fixes `\b` at a non-zero search offset, so some word-boundary tests now pass too.
+Before that, adding inline flags (`(?imsxU)` directives and scoped groups) plus the
+harness' `case-insensitive` → `(?i)` folding raised the pass count 590 → 622 and dropped
 fail-to-parse 207 → 161 (46 patterns that used to be rejected now parse — case-folding,
-dot-all, verbose, swap-greedy and the no-op `(?-u)`/`(?u)` toggles). Some of those land
-in fail-to-pass instead (318 → 328): chiefly Unicode case-folding the ASCII fold can't
-reproduce. Earlier milestones: switching to a priority-preserving (leftmost-first)
-subset construction with lazy quantifiers took 568 → 590; alternation/grouping before
-that more than doubled it (269 → 568). The remaining fail-to-pass cases stem from the
-gaps above (ASCII-only Unicode, no backtracking for boundaries, no multiline). The
-`--nocapture` output lists every failing test name to make triage easy.
+dot-all, verbose, swap-greedy and the no-op `(?-u)`/`(?u)` toggles); some of those landed
+in fail-to-pass instead (chiefly Unicode case-folding the ASCII fold can't reproduce).
+Earlier milestones: switching to a priority-preserving (leftmost-first) subset
+construction with lazy quantifiers took 568 → 590; alternation/grouping before that more
+than doubled it (269 → 568). The remaining fail-to-pass cases stem from the gaps above
+(ASCII-only Unicode, no backtracking for boundaries, CRLF). The `--nocapture` output
+lists every failing test name to make triage easy.
+
+## Highest-impact gaps (ranked by conformance count)
+
+The 161 fail-to-parse and 328 fail-to-pass failures cluster into a few features, so
+impact is concentrated. Counts below are from grouping the `--nocapture` failure list
+by test suite.
+
+### 1. Multiline / line anchors — ~~`(?m)`~~, CRLF, custom line-terminator
+**`(?m)` is now done** (pass 622 → 682). The fix was the calling convention: the
+matcher now takes a `prev: Option<char>` argument (the char before its slice), so
+`run_search` can feed the real preceding char and `^`/`$` lower to zero-width
+`StartOfLine`/`EndOfLine` assertions evaluated in the matcher loop like `\b`. This also
+fixed `\b` at a non-zero offset, so fail-to-pass fell too.
+
+Remaining in this bucket:
+
+| suite | ~count | needs |
+|---|---|---|
+| crlf / `(?R)` | ~30 | `\r\n` treated as a single line terminator |
+| line-terminator | ~9 | custom (non-`\n`) line terminators |
+
+CRLF mode reuses the same `prev`/lookahead machinery but must treat `\r\n` as one
+terminator (a `$` before `\r`, a `^` after `\n`) and exclude `\r\n` from `.` — a
+follow-on once the `\n`-only model is generalised to a configurable terminator.
+
+### 2. Unicode awareness — `\p{…}`, Unicode `\w`/`\b`/`.`, Unicode case folding → ~150–200 tests
+Dominates fail-to-pass.
+
+| suite | count |
+|---|---|
+| unicode | 72 |
+| word-boundary-special | 74 |
+| word-boundary | 40 |
+| utf8 | 16 |
+
+Most fail because the engine is ASCII/byte-class based: Unicode word-ness for `\b`,
+`\p{...}` classes, and full Unicode case folding (the `(?i)` ASCII fold can't reproduce
+it). Highest raw count, but by far the most expensive — needs Unicode property tables
+and UTF-8-aware transitions, i.e. a near-rewrite of the class model. A long-term
+direction, not a quick win.
+
+### 3. ASCII word-boundary correctness → ~30–60 tests (subset of #2's buckets)
+A meaningful slice of the word-boundary failures are pure ASCII and fixable *without*
+Unicode — `\b` / `^\b` / `\b^` producing empty matches at string/word edges (`wb2`,
+`wb4`, `wb43`), and `.*\bx`-style patterns the non-backtracking matcher gets wrong.
+Fixing zero-width `\b` handling and empty-match iteration in the search loop is medium
+effort and decoupled from the big Unicode lift.
+
+### 4. Cheap, localized parser wins → small but easy
+- **Negated shorthands inside classes** — `[\D]`, `[a\W]` (the flat
+  `Group(bool, Vec<GroupEntry>)` can't represent a union with a negated subset).
+- **POSIX classes** — `[[:alpha:]]`.
+
+Low counts, but each is a self-contained change to `parse.rs`'s group model.
+
+**Bottom line:** the multiline/line-anchor plumbing (#1) is done — `(?m)` landed +60
+tests by threading the preceding char into the matcher. Next, for raw pass count Unicode
+(#2) is the largest pool but the most work; the CRLF/line-terminator remainder of #1 and
+the cheap parser wins (#4) are smaller, lower-effort follow-ons. Scope #2 as a separate
+Unicode initiative.
 
 ## Escape hatch
 
