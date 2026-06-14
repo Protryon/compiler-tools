@@ -13,6 +13,11 @@ compiler-tools-regex = { version = "0.2.0", path = "../compiler-tools-regex" }
 compiler-tools = { version = "0.2.0", path = "../compiler-tools" }
 regex-test = "0.1"
 
+[features]
+# Run the Cranelift JIT engine as a third conformance column (off by default — pulls in
+# Cranelift). `cargo test -p regex-conformance --features jit --test conformance -- --nocapture`.
+jit = ["compiler-tools-regex/jit"]
+
 [dev-dependencies]
 # The benchmark times the passing-test set across the two simple-regex engines
 # and the upstream `regex` crate (for comparison), driven by cargo-criterion.

@@ -17,3 +17,18 @@ proc-macro2 = "1.0"
 # macro-expansion / build time, so `regex-syntax` never reaches the runtime crate —
 # generated matchers stay plain codepoint-range checks with no Unicode dependency.
 regex-syntax = "0.8"
+
+# The `jit` backend: a third consumer of the `Dfa` that lowers it to native code at
+# runtime via Cranelift (alongside the interpreter in `matching.rs` and the Rust-source
+# codegen in `generate.rs`). Off by default — Cranelift is a heavy tree, so it stays
+# opt-in. Pinned to 0.121.x, whose `rust-version` is exactly the workspace MSRV (1.85.0);
+# newer Cranelift releases raise their MSRV in lockstep with the Rust release train, so
+# bumping these crates means bumping the workspace MSRV too.
+cranelift-jit = { version = "0.121.2", optional = true }
+cranelift-module = { version = "0.121.2", optional = true }
+cranelift-codegen = { version = "0.121.2", optional = true }
+cranelift-frontend = { version = "0.121.2", optional = true }
+
+[features]
+default = []
+jit = ["dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-codegen", "dep:cranelift-frontend"]

@@ -9,30 +9,35 @@
 //!    engine reproduces the corpus' expected matches. We additionally require
 //!    the upstream `regex` crate to compile the pattern, so all three engines
 //!    benchmark the *identical* workload.
-//! 2. **Benchmark** (timed): run that passing set, as a whole, through three
+//! 2. **Benchmark** (timed): run that passing set, as a whole, through these
 //!    engines so cargo-criterion can compare them:
 //!      * `simple-runtime`  — `SimpleRegex::find_prefix` (DFA interpreter),
 //!      * `simple-compiled` — the generated-Rust matchers (`compiled_lookup`),
+//!      * `simple-jit`      — the Cranelift JIT (`SimpleRegex::compile_jit`), only
+//!        under `--features jit`,
 //!      * `regex-crate`     — the upstream `regex` crate, for comparison.
 //!
-//! All three are driven through the same [`run_search`] loop so the comparison
-//! reflects matcher cost, not differing search harnesses. The `regex` matcher is
-//! anchored with `\A(?:…)` to behave as the prefix matcher `run_search` expects.
+//! All are driven through the same [`run_search`] loop so the comparison reflects
+//! matcher cost, not differing search harnesses. The `regex` matcher is anchored
+//! with `\A(?:…)` to behave as the prefix matcher `run_search` expects.
 //!
-//! Run with: `cargo criterion --bench passing` (or `cargo bench --bench passing`).
+//! Run with: `cargo criterion --bench passing` (or `cargo bench --bench passing`);
+//! add `--features jit` to include the `simple-jit` engine.
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use regex_conformance::{SimpleRegex, compiled_lookup, load_corpus, passes, run_search};
 use regex_test::{RegexTest, RegexTests};
 use std::hint::black_box;
 
-/// Everything needed to run one passing test through each of the three engines,
-/// with all per-test compilation done once, up front (outside the timed loop).
+/// Everything needed to run one passing test through each engine, with all per-test
+/// compilation done once, up front (outside the timed loop).
 struct Case<'a> {
     test: &'a RegexTest,
     simple: SimpleRegex,
     compiled: fn(&str, Option<char>) -> Option<(&str, &str)>,
     full: regex::Regex,
+    #[cfg(feature = "jit")]
+    jit: compiler_tools_regex::JitRegex,
 }
 
 /// Build the passing set. Kept out of the timed region entirely.
@@ -48,6 +53,10 @@ fn select(corpus: &RegexTests) -> Vec<Case<'_>> {
                 return None;
             }
             let simple = SimpleRegex::parse(pattern)?;
+            // JIT-compile once here (heavy), before `simple` is moved into `Case`; the
+            // resulting `JitRegex` owns its code, so it outlives the borrow.
+            #[cfg(feature = "jit")]
+            let jit = simple.compile_jit().ok()?;
             let compiled = compiled_lookup(test.full_name())?;
             // Anchor so `regex::Regex::find` behaves like the engine's prefix matcher.
             let full = regex::Regex::new(&format!(r"\A(?:{pattern})")).ok()?;
@@ -65,6 +74,8 @@ fn select(corpus: &RegexTests) -> Vec<Case<'_>> {
                 simple,
                 compiled,
                 full,
+                #[cfg(feature = "jit")]
+                jit,
             })
         })
         .collect()
@@ -91,6 +102,15 @@ fn bench_passing(c: &mut Criterion) {
         b.iter(|| {
             for case in &cases {
                 black_box(run_search(|input, prev| (case.compiled)(input, prev), case.test));
+            }
+        });
+    });
+
+    #[cfg(feature = "jit")]
+    group.bench_function("simple-jit", |b| {
+        b.iter(|| {
+            for case in &cases {
+                black_box(run_search(|input, prev| case.jit.find_prefix(input, prev), case.test));
             }
         });
     });

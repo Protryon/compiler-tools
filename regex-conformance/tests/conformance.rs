@@ -147,7 +147,25 @@ fn conformance_summary() {
             return Prepared::FailToParse;
         }
         match compiled_lookup(test.full_name()) {
-            Some(matcher) => Prepared::Run(Box::new(move |input, prev| matcher(input, prev))),
+            Some(matcher) => Prepared::Run(Box::new(matcher)),
+            None => Prepared::FailToParse,
+        }
+    });
+
+    // JIT engine (feature-gated): Cranelift compiles the same DFA to native code. It must
+    // agree with the other two, since all three are driven from the same DFA.
+    #[cfg(feature = "jit")]
+    let jit = summarize("jit engine", &tests, |test| {
+        let [_] = test.regexes() else {
+            return Prepared::Skip;
+        };
+        match SimpleRegex::parse(&effective_pattern(test)) {
+            // A JIT build failure (e.g. a non-64-bit host) counts as fail-to-parse, the same
+            // bucket the compiled engine uses when it has no matcher for a parsed pattern.
+            Some(regex) => match regex.compile_jit() {
+                Ok(jit) => Prepared::Run(Box::new(move |input, prev| jit.find_prefix(input, prev))),
+                Err(_) => Prepared::FailToParse,
+            },
             None => Prepared::FailToParse,
         }
     });
@@ -155,10 +173,28 @@ fn conformance_summary() {
     // Failing-test names first, so the numeric summaries land at the end.
     runtime.report_failures();
     compiled.report_failures();
+    #[cfg(feature = "jit")]
+    jit.report_failures();
 
     runtime.report();
     compiled.report();
+    #[cfg(feature = "jit")]
+    jit.report();
 
     println!("\n=== total ===");
+    #[cfg(not(feature = "jit"))]
     println!("  wall time:     {:.3?}", runtime.wall_time + compiled.wall_time);
+    #[cfg(feature = "jit")]
+    println!("  wall time:     {:.3?}", runtime.wall_time + compiled.wall_time + jit.wall_time);
+
+    // Unlike the interpreter-vs-compiled comparison (a bring-up harness that never fails),
+    // the JIT *must* agree with the interpreter exactly — both walk the same DFA — so any
+    // divergence is a JIT lowering bug and fails the test.
+    #[cfg(feature = "jit")]
+    {
+        assert_eq!(jit.pass, runtime.pass, "JIT pass count diverged from the interpreter");
+        assert_eq!(jit.skipped, runtime.skipped, "JIT skipped count diverged from the interpreter");
+        assert_eq!(jit.fail_to_parse, runtime.fail_to_parse, "JIT fail-to-parse set diverged from the interpreter");
+        assert_eq!(jit.fail_to_pass, runtime.fail_to_pass, "JIT fail-to-pass set diverged from the interpreter");
+    }
 }

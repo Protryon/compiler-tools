@@ -13,10 +13,15 @@ use self::{dfa::Dfa, nfa::Nfa};
 
 mod dfa;
 mod generate;
+#[cfg(feature = "jit")]
+mod jit;
 mod matching;
 mod nfa;
 mod parse;
 mod unicode;
+
+#[cfg(feature = "jit")]
+pub use jit::{JitError, JitRegex};
 
 /// Collect an iterator of token-producing values into one [`TokenStream`].
 ///
