@@ -330,45 +330,58 @@ impl Lower<'_> {
             }
         }
 
-        let has_char = bcx.ins().icmp_imm(IntCC::NotEqual, cw, 0);
-
-        // Consuming edges become a brif chain; zero-width edges are collected (in priority
-        // order) for the fallback, mirroring `generate.rs`'s `Some(..)` arms vs `other` arm.
+        // Consuming edges are disjoint sorted codepoint ranges (the DFA's `partition`
+        // guarantees it), so the whole dispatch is a binary search over `(lo, hi) -> target`
+        // rather than a linear scan with eager class membership. Zero-width edges are
+        // collected for the fallback, mirroring `generate.rs`'s `Some(..)` arms vs `other`.
+        let mut leaves: Vec<(u32, u32, u32)> = vec![]; // (lo, hi, target state)
         let mut zw_edges: Vec<(&TransitionEvent, u32)> = vec![];
         for (event, target) in transitions {
-            let cond = match event {
-                TransitionEvent::Char(c) => {
-                    let want = bcx.ins().iconst(types::I32, i64::from(*c as u32));
-                    let eq = bcx.ins().icmp(IntCC::Equal, cp, want);
-                    bcx.ins().band(has_char, eq)
+            match event {
+                TransitionEvent::Char(_) | TransitionEvent::Chars(..) => {
+                    leaves.extend(consuming_ranges(event).into_iter().map(|(lo, hi)| (lo, hi, *target)));
                 }
-                TransitionEvent::Chars(inverted, group) => {
-                    let member = build_membership(bcx, cp, group);
-                    let inner = if *inverted { bcx.ins().bxor_imm(member, 1) } else { member };
-                    bcx.ins().band(has_char, inner)
-                }
-                TransitionEvent::End | TransitionEvent::Epsilon => continue, // accept marker / never in a DFA
-                _ => {
-                    zw_edges.push((event, *target));
-                    continue;
-                }
-            };
-
-            let adv = bcx.create_block();
-            let cont = bcx.create_block();
-            bcx.ins().brif(cond, adv, &[], cont, &[]);
-
-            // Matched: advance the cursor past the lookahead and jump to the target state.
-            bcx.switch_to_block(adv);
-            self.advance(bcx, cp, cw, self.state_blocks[target]);
-
-            // Didn't match this edge: keep testing the rest from here.
-            bcx.switch_to_block(cont);
+                TransitionEvent::End | TransitionEvent::Epsilon => {} // accept marker / never in a DFA
+                _ => zw_edges.push((event, *target)),
+            }
         }
 
-        // No consuming edge claimed the lookahead: try the zero-width assertions.
+        // No consuming edges: straight to the zero-width fallback.
+        if leaves.is_empty() {
+            self.zw_chain(bcx, &zw_edges, cp, cw);
+            return;
+        }
+        leaves.sort_unstable_by_key(|&(lo, ..)| lo);
+
+        // The fallback block: reached at end of input, or when the lookahead is in no range.
+        let zw_block = bcx.create_block();
+        // One advance block per distinct target (ranges can share a target); BTreeMap keeps
+        // emission order deterministic.
+        let mut target_adv: std::collections::BTreeMap<u32, Block> = std::collections::BTreeMap::new();
+        for &(.., t) in &leaves {
+            target_adv.entry(t).or_insert_with(|| bcx.create_block());
+        }
+        let resolved: Vec<(u32, u32, Block)> = leaves.iter().map(|&(lo, hi, t)| (lo, hi, target_adv[&t])).collect();
+
+        // At end of input there is no char to consume, so skip straight to the fallback.
+        let has_char = bcx.ins().icmp_imm(IntCC::NotEqual, cw, 0);
+        let dispatch = bcx.create_block();
+        bcx.ins().brif(has_char, dispatch, &[], zw_block, &[]);
+
+        bcx.switch_to_block(dispatch);
+        emit_range_search(bcx, cp, &resolved, zw_block);
+
+        // Each target's advance block: consume the char and jump to the target state.
+        for (target, block) in target_adv {
+            bcx.switch_to_block(block);
+            self.advance(bcx, cp, cw, self.state_blocks[&target]);
+        }
+
+        // No consuming range claimed the lookahead: try the zero-width assertions.
+        bcx.switch_to_block(zw_block);
         self.zw_chain(bcx, &zw_edges, cp, cw);
     }
+
 
     /// The fallback after no consuming edge matched: take the highest-priority zero-width
     /// assertion that holds, as a zero-width move (state changes; cursor/lookahead do not),
@@ -635,30 +648,93 @@ impl Lower<'_> {
     }
 }
 
-/// A boolean (`I8`) value: whether the codepoint `cp` is in `group` (ignoring negation —
-/// the caller inverts). An empty group is never a member (`false`).
-fn build_membership(bcx: &mut FunctionBuilder, cp: Value, group: &[GroupEntry]) -> Value {
-    let mut acc: Option<Value> = None;
-    for entry in group {
-        let test = match entry {
-            GroupEntry::Char(c) => {
-                let want = bcx.ins().iconst(types::I32, i64::from(*c as u32));
-                bcx.ins().icmp(IntCC::Equal, cp, want)
-            }
-            GroupEntry::Range(lo, hi) => {
-                let lo = bcx.ins().iconst(types::I32, i64::from(*lo as u32));
-                let hi = bcx.ins().iconst(types::I32, i64::from(*hi as u32));
-                let ge = bcx.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, cp, lo);
-                let le = bcx.ins().icmp(IntCC::UnsignedLessThanOrEqual, cp, hi);
-                bcx.ins().band(ge, le)
-            }
-        };
-        acc = Some(match acc {
-            None => test,
-            Some(prev) => bcx.ins().bor(prev, test),
-        });
+/// Binary search over the disjoint sorted ranges `leaves` (`(lo, hi, advance-block)`) on
+/// codepoint `cp`: branch to the matching range's advance block, or to `zw_block` if `cp`
+/// is in no range — O(log n) comparisons instead of a linear edge scan. Assumes the builder
+/// is positioned at the block this sub-search should begin in.
+fn emit_range_search(bcx: &mut FunctionBuilder, cp: Value, leaves: &[(u32, u32, Block)], zw_block: Block) {
+    match leaves {
+        [] => {
+            bcx.ins().jump(zw_block, &[]);
+        }
+        [(lo, hi, target)] => {
+            // Leaf: `cp` lies in this range, or it fell into a gap → fallback.
+            let ge = bcx.ins().icmp_imm(IntCC::UnsignedGreaterThanOrEqual, cp, i64::from(*lo));
+            let le = bcx.ins().icmp_imm(IntCC::UnsignedLessThanOrEqual, cp, i64::from(*hi));
+            let in_range = bcx.ins().band(ge, le);
+            bcx.ins().brif(in_range, *target, &[], zw_block, &[]);
+        }
+        _ => {
+            // Split on the midpoint range's lower bound: `cp < pivot` ⇒ left half (ranges are
+            // sorted and disjoint), else the midpoint or a later range.
+            let mid = leaves.len() / 2;
+            let pivot = leaves[mid].0;
+            let left = bcx.create_block();
+            let right = bcx.create_block();
+            let lt = bcx.ins().icmp_imm(IntCC::UnsignedLessThan, cp, i64::from(pivot));
+            bcx.ins().brif(lt, left, &[], right, &[]);
+            bcx.switch_to_block(left);
+            emit_range_search(bcx, cp, &leaves[..mid], zw_block);
+            bcx.switch_to_block(right);
+            emit_range_search(bcx, cp, &leaves[mid..], zw_block);
+        }
     }
-    acc.unwrap_or_else(|| bcx.ins().iconst(types::I8, 0))
+}
+
+/// The largest Unicode scalar value — the upper bound when complementing a class.
+const MAX_CP: u32 = 0x10FFFF;
+
+/// The codepoint set a consuming edge accepts, as sorted disjoint ranges. Mirrors
+/// `dfa::event_ranges`. In practice the DFA's `partition` already emits non-inverted,
+/// normalized classes (`Char`/`Chars(false, …)`), so `inverted` is never set here — it is
+/// handled for completeness / to match the interpreter's semantics exactly.
+fn consuming_ranges(event: &TransitionEvent) -> Vec<(u32, u32)> {
+    match event {
+        TransitionEvent::Char(c) => vec![(*c as u32, *c as u32)],
+        TransitionEvent::Chars(inverted, group) => {
+            let mut ranges: Vec<(u32, u32)> = group
+                .iter()
+                .map(|entry| match entry {
+                    GroupEntry::Char(c) => (*c as u32, *c as u32),
+                    GroupEntry::Range(lo, hi) => (*lo as u32, *hi as u32),
+                })
+                .collect();
+            normalize(&mut ranges);
+            if *inverted { complement(&ranges) } else { ranges }
+        }
+        _ => vec![],
+    }
+}
+
+/// Sort and merge inclusive ranges into disjoint, ordered pieces.
+fn normalize(ranges: &mut Vec<(u32, u32)>) {
+    ranges.retain(|(lo, hi)| lo <= hi);
+    ranges.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = vec![];
+    for (lo, hi) in ranges.drain(..) {
+        match merged.last_mut() {
+            Some(last) if lo <= last.1.saturating_add(1) => last.1 = last.1.max(hi),
+            _ => merged.push((lo, hi)),
+        }
+    }
+    *ranges = merged;
+}
+
+/// Complement of a normalized range list over `[0, MAX_CP]`.
+fn complement(ranges: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let mut out = vec![];
+    let mut next = 0u32;
+    for &(lo, hi) in ranges {
+        if lo > next {
+            out.push((next, lo - 1));
+        }
+        next = hi.saturating_add(1);
+        if next > MAX_CP {
+            return out;
+        }
+    }
+    out.push((next, MAX_CP));
+    out
 }
 
 /// Every simple path of zero-width assertion edges from `state` to an accepting state, as
