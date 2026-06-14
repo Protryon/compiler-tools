@@ -58,15 +58,28 @@ pub enum Atom {
     /// (`\b`) or match (`\B`); the edges of the input count as non-word. Consumes
     /// nothing. `unicode` (set by `(?u)`) selects Unicode `\w` word-ness over the
     /// default ASCII `[0-9A-Za-z_]`.
-    WordBoundary { negate: bool, unicode: bool },
+    WordBoundary {
+        negate: bool,
+        unicode: bool,
+    },
     /// A zero-width multiline start-of-line assertion: `^` under `(?m)`. Holds at
-    /// the start of the input or immediately after a `\n`. Only emitted when the
-    /// multiline flag is set; otherwise a leading `^` is dropped (see `parse.rs`).
-    StartOfLine,
+    /// the start of the input or immediately after a line terminator. Only emitted
+    /// when the multiline flag is set; otherwise a leading `^` is dropped (see
+    /// `parse.rs`). `crlf` (set by `(?R)`) treats `\r`, `\n` and the atomic `\r\n`
+    /// all as terminators, so `^` does not hold between the `\r` and `\n` of a CRLF
+    /// pair; otherwise the only terminator is `\n`.
+    StartOfLine {
+        crlf: bool,
+    },
     /// A zero-width multiline end-of-line assertion: `$` under `(?m)`. Holds at the
-    /// end of the input or immediately before a `\n`. Only emitted when the
-    /// multiline flag is set; otherwise a trailing `$` lowers to [`Atom::EndOfInput`].
-    EndOfLine,
+    /// end of the input or immediately before a line terminator. Only emitted when
+    /// the multiline flag is set; otherwise a trailing `$` lowers to
+    /// [`Atom::EndOfInput`]. `crlf` (set by `(?R)`) matches the [`Atom::StartOfLine`]
+    /// CRLF rule: `$` holds before a `\r` or a lone `\n`, but not between the `\r`
+    /// and `\n` of a CRLF pair.
+    EndOfLine {
+        crlf: bool,
+    },
     /// A parenthesised sub-expression with alternation: `(a|bc|d)`. Each inner
     /// `Vec<AtomRepeat>` is one `|`-separated branch (a sequence of atoms); a plain
     /// group `(...)` is just an alternation with a single branch. Capturing,

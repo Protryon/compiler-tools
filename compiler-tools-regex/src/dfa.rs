@@ -268,8 +268,10 @@ impl Dfa {
             // Gather the non-epsilon edges leaving the closure, in priority order.
             let mut consuming: Vec<(Ranges, u32)> = vec![];
             let mut end_of_input: Closure = vec![];
-            let mut end_of_line: Closure = vec![];
-            let mut start_of_line: Closure = vec![];
+            // Line anchors keyed by `crlf as usize` so the `\n`-only and CRLF variants
+            // (a pattern can mix them with scoped `(?R)`) stay distinct edges.
+            let mut end_of_line: [Closure; 2] = [vec![], vec![]];
+            let mut start_of_line: [Closure; 2] = [vec![], vec![]];
             // Word-boundary follow-ons, keyed by `negate as usize | (unicode as usize) << 1`
             // so the ASCII and Unicode `\b`/`\B` variants stay distinct edges.
             let mut boundaries: [Closure; 4] = [vec![], vec![], vec![], vec![]];
@@ -285,11 +287,16 @@ impl Dfa {
                         TransitionEvent::Epsilon => {}
                         TransitionEvent::Char(_) | TransitionEvent::Chars(..) => consuming.push((event_ranges(event), *target)),
                         TransitionEvent::EndOfInput => push_unique(&mut end_of_input, *target),
-                        TransitionEvent::EndOfLine => push_unique(&mut end_of_line, *target),
-                        TransitionEvent::StartOfLine => push_unique(&mut start_of_line, *target),
-                        TransitionEvent::WordBoundary { negate, unicode } => {
-                            push_unique(&mut boundaries[*negate as usize | (*unicode as usize) << 1], *target)
-                        }
+                        TransitionEvent::EndOfLine {
+                            crlf,
+                        } => push_unique(&mut end_of_line[*crlf as usize], *target),
+                        TransitionEvent::StartOfLine {
+                            crlf,
+                        } => push_unique(&mut start_of_line[*crlf as usize], *target),
+                        TransitionEvent::WordBoundary {
+                            negate,
+                            unicode,
+                        } => push_unique(&mut boundaries[*negate as usize | (*unicode as usize) << 1], *target),
                         // The NFA never stores an explicit `End` edge.
                         TransitionEvent::End => {}
                     }
@@ -316,20 +323,42 @@ impl Dfa {
                 let target_id = wire(end_of_input, &mut interner, &mut worklist);
                 out.push((TransitionEvent::EndOfInput, target_id));
             }
-            if !end_of_line.is_empty() {
-                let target_id = wire(end_of_line, &mut interner, &mut worklist);
-                out.push((TransitionEvent::EndOfLine, target_id));
+            for crlf in [false, true] {
+                let targets = std::mem::take(&mut end_of_line[crlf as usize]);
+                if !targets.is_empty() {
+                    let target_id = wire(targets, &mut interner, &mut worklist);
+                    out.push((
+                        TransitionEvent::EndOfLine {
+                            crlf,
+                        },
+                        target_id,
+                    ));
+                }
             }
-            if !start_of_line.is_empty() {
-                let target_id = wire(start_of_line, &mut interner, &mut worklist);
-                out.push((TransitionEvent::StartOfLine, target_id));
+            for crlf in [false, true] {
+                let targets = std::mem::take(&mut start_of_line[crlf as usize]);
+                if !targets.is_empty() {
+                    let target_id = wire(targets, &mut interner, &mut worklist);
+                    out.push((
+                        TransitionEvent::StartOfLine {
+                            crlf,
+                        },
+                        target_id,
+                    ));
+                }
             }
             for unicode in [false, true] {
                 for negate in [false, true] {
                     let targets = std::mem::take(&mut boundaries[negate as usize | (unicode as usize) << 1]);
                     if !targets.is_empty() {
                         let target_id = wire(targets, &mut interner, &mut worklist);
-                        out.push((TransitionEvent::WordBoundary { negate, unicode }, target_id));
+                        out.push((
+                            TransitionEvent::WordBoundary {
+                                negate,
+                                unicode,
+                            },
+                            target_id,
+                        ));
                     }
                 }
             }

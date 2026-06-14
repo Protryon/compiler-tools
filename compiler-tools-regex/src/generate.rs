@@ -26,7 +26,10 @@ impl SimpleRegex {
         for transitions in self.dfa.transitions.values() {
             for (transition, _) in transitions {
                 match transition {
-                    nfa::TransitionEvent::WordBoundary { unicode, .. } => {
+                    nfa::TransitionEvent::WordBoundary {
+                        unicode,
+                        ..
+                    } => {
                         needs_prev = true;
                         has_zero_width = true;
                         if *unicode {
@@ -35,11 +38,20 @@ impl SimpleRegex {
                             needs_word_ascii = true;
                         }
                     }
-                    nfa::TransitionEvent::StartOfLine => {
+                    nfa::TransitionEvent::StartOfLine {
+                        ..
+                    } => {
                         needs_prev = true;
                         has_zero_width = true;
                     }
-                    nfa::TransitionEvent::EndOfInput | nfa::TransitionEvent::EndOfLine => has_zero_width = true,
+                    // A CRLF `$` checks `prev != '\r'`, so it needs the previous char too.
+                    nfa::TransitionEvent::EndOfLine {
+                        crlf,
+                    } => {
+                        has_zero_width = true;
+                        needs_prev |= *crlf;
+                    }
+                    nfa::TransitionEvent::EndOfInput => has_zero_width = true,
                     _ => {}
                 }
             }
@@ -89,8 +101,18 @@ impl SimpleRegex {
 
         // Shared fragments injected into every consuming arm. `prev`/`zero_width` are
         // only maintained when some state needs them.
-        let reset_zw = if has_zero_width { quote! { zero_width = 0; } } else { quote! {} };
-        let set_prev = |val: TokenStream| if needs_prev { quote! { prev = #val; } } else { quote! {} };
+        let reset_zw = if has_zero_width {
+            quote! { zero_width = 0; }
+        } else {
+            quote! {}
+        };
+        let set_prev = |val: TokenStream| {
+            if needs_prev {
+                quote! { prev = #val; }
+            } else {
+                quote! {}
+            }
+        };
 
         let mut state_arms = vec![];
         for (state, transitions) in &self.dfa.transitions {
@@ -105,10 +127,16 @@ impl SimpleRegex {
                 match transition {
                     nfa::TransitionEvent::Epsilon => unreachable!(),
                     nfa::TransitionEvent::End => is_accepting = true,
-                    nfa::TransitionEvent::WordBoundary { .. }
+                    nfa::TransitionEvent::WordBoundary {
+                        ..
+                    }
                     | nfa::TransitionEvent::EndOfInput
-                    | nfa::TransitionEvent::EndOfLine
-                    | nfa::TransitionEvent::StartOfLine => zero_width.push((transition, *target)),
+                    | nfa::TransitionEvent::EndOfLine {
+                        ..
+                    }
+                    | nfa::TransitionEvent::StartOfLine {
+                        ..
+                    } => zero_width.push((transition, *target)),
                     nfa::TransitionEvent::Char(c) => {
                         let prev_set = set_prev(quote! { Some(#c) });
                         consuming_arms.push(quote! {
@@ -172,7 +200,11 @@ impl SimpleRegex {
 
             // Fold the accept into the arm: an accepting state records the position the
             // moment it is (re-)entered, replacing the old per-iteration `is_accepting`.
-            let accept = if is_accepting { quote! { last = counter; } } else { quote! {} };
+            let accept = if is_accepting {
+                quote! { last = counter; }
+            } else {
+                quote! {}
+            };
 
             // The zero-width moves are evaluated only when no consuming edge claimed the
             // lookahead char (`other`), in stored priority order:
@@ -190,9 +222,31 @@ impl SimpleRegex {
                 for (event, target) in zero_width.iter().rev() {
                     let cond = match event {
                         nfa::TransitionEvent::EndOfInput => quote! { other.is_none() },
-                        nfa::TransitionEvent::EndOfLine => quote! { matches!(other, None | Some('\n')) },
-                        nfa::TransitionEvent::StartOfLine => quote! { matches!(prev, None | Some('\n')) },
-                        nfa::TransitionEvent::WordBoundary { negate, unicode } => {
+                        // `$` under `(?m)`: end of input or before a line terminator. CRLF
+                        // mode widens the terminator set to `\r`/`\n`/`\r\n`, holding before
+                        // a `\r` or a lone `\n` but not between the `\r` and `\n` of a pair.
+                        nfa::TransitionEvent::EndOfLine {
+                            crlf: false,
+                        } => quote! { matches!(other, None | Some('\n')) },
+                        nfa::TransitionEvent::EndOfLine {
+                            crlf: true,
+                        } => {
+                            quote! { matches!(other, None | Some('\r')) || (other == Some('\n') && prev != Some('\r')) }
+                        }
+                        // `^` under `(?m)`: start of input or after a line terminator; the
+                        // CRLF rule mirrors `$` (after `\n` or a lone `\r`, not inside `\r\n`).
+                        nfa::TransitionEvent::StartOfLine {
+                            crlf: false,
+                        } => quote! { matches!(prev, None | Some('\n')) },
+                        nfa::TransitionEvent::StartOfLine {
+                            crlf: true,
+                        } => {
+                            quote! { matches!(prev, None | Some('\n')) || (prev == Some('\r') && other != Some('\n')) }
+                        }
+                        nfa::TransitionEvent::WordBoundary {
+                            negate,
+                            unicode,
+                        } => {
                             // Word-ness via the once-emitted helper for this boundary's mode.
                             let is_word = if *unicode {
                                 quote! { is_word_unicode }
@@ -250,14 +304,25 @@ impl SimpleRegex {
         } else {
             quote! { _prev_in }
         };
-        let prev_decl = if needs_prev { quote! { let mut prev: Option<char> = prev_in; } } else { quote! {} };
-        let zero_width_decl = if has_zero_width { quote! { let mut zero_width = 0usize; } } else { quote! {} };
+        let prev_decl = if needs_prev {
+            quote! { let mut prev: Option<char> = prev_in; }
+        } else {
+            quote! {}
+        };
+        let zero_width_decl = if has_zero_width {
+            quote! { let mut zero_width = 0usize; }
+        } else {
+            quote! {}
+        };
 
         quote! {
             // `prev_in` is the char immediately before `from` in the larger input (the
             // caller supplies it; `None` means start of text). It seeds the zero-width
             // assertions — `^` under `(?m)` and `\b` — so a slice taken mid-input still
             // sees the correct preceding context.
+            // A trivial pattern (e.g. the empty regex or a bare anchor) compiles to a
+            // `loop` whose every arm `break`s; that is correct, so silence `never_loop`.
+            #[allow(clippy::never_loop)]
             fn #fn_name(from: &str, #prev_param: Option<char>) -> Option<(&str, &str)> {
                 // Word-ness helpers, emitted once for the whole matcher (only when a
                 // `\b`/`\B` of the matching mode is reachable).

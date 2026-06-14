@@ -14,7 +14,11 @@ use super::GroupEntry;
 /// One inclusive codepoint range as a [`GroupEntry`], collapsing a single-codepoint
 /// range to a `Char` (the common case).
 fn entry_for(start: char, end: char) -> GroupEntry {
-    if start == end { GroupEntry::Char(start) } else { GroupEntry::Range(start, end) }
+    if start == end {
+        GroupEntry::Char(start)
+    } else {
+        GroupEntry::Range(start, end)
+    }
 }
 
 /// Build a `regex-syntax` Unicode class from our [`GroupEntry`] list (overlapping /

@@ -55,7 +55,11 @@ pub fn effective_pattern(test: &RegexTest) -> String {
     if test.case_insensitive() {
         inline.push('i');
     }
-    if inline.is_empty() { pattern.clone() } else { format!("(?{inline}){pattern}") }
+    if inline.is_empty() {
+        pattern.clone()
+    } else {
+        format!("(?{inline}){pattern}")
+    }
 }
 
 /// The directory holding the TOML test corpus (`<workspace>/testdata`).

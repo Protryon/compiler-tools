@@ -12,13 +12,22 @@ pub enum TransitionEvent {
     EndOfInput,
     /// Zero-width word-boundary assertion (`\b` / `\B`); `negate` flips it and
     /// `unicode` selects Unicode `\w` word-ness over ASCII.
-    WordBoundary { negate: bool, unicode: bool },
+    WordBoundary {
+        negate: bool,
+        unicode: bool,
+    },
     /// Zero-width multiline start-of-line assertion (`^` under `(?m)`): taken at the
-    /// start of input or immediately after a `\n`.
-    StartOfLine,
+    /// start of input or immediately after a line terminator. `crlf` (set by `(?R)`)
+    /// also treats `\r` and the atomic `\r\n` as terminators.
+    StartOfLine {
+        crlf: bool,
+    },
     /// Zero-width multiline end-of-line assertion (`$` under `(?m)`): taken at the
-    /// end of input or immediately before a `\n`.
-    EndOfLine,
+    /// end of input or immediately before a line terminator. `crlf` (set by `(?R)`)
+    /// also treats `\r` and the atomic `\r\n` as terminators.
+    EndOfLine {
+        crlf: bool,
+    },
     End,
 }
 
@@ -45,7 +54,16 @@ impl TransitionEvent {
                 *inverted
             }
             // A zero-width assertion never consumes a character.
-            TransitionEvent::EndOfInput | TransitionEvent::WordBoundary { .. } | TransitionEvent::StartOfLine | TransitionEvent::EndOfLine => false,
+            TransitionEvent::EndOfInput
+            | TransitionEvent::WordBoundary {
+                ..
+            }
+            | TransitionEvent::StartOfLine {
+                ..
+            }
+            | TransitionEvent::EndOfLine {
+                ..
+            } => false,
             TransitionEvent::End => true,
         }
     }
@@ -167,7 +185,10 @@ impl Builder {
                 self.edge(start, TransitionEvent::EndOfInput, end);
                 end
             }
-            Atom::WordBoundary { negate, unicode } => {
+            Atom::WordBoundary {
+                negate,
+                unicode,
+            } => {
                 let end = self.new_state();
                 self.edge(
                     start,
@@ -179,14 +200,30 @@ impl Builder {
                 );
                 end
             }
-            Atom::StartOfLine => {
+            Atom::StartOfLine {
+                crlf,
+            } => {
                 let end = self.new_state();
-                self.edge(start, TransitionEvent::StartOfLine, end);
+                self.edge(
+                    start,
+                    TransitionEvent::StartOfLine {
+                        crlf: *crlf,
+                    },
+                    end,
+                );
                 end
             }
-            Atom::EndOfLine => {
+            Atom::EndOfLine {
+                crlf,
+            } => {
                 let end = self.new_state();
-                self.edge(start, TransitionEvent::EndOfLine, end);
+                self.edge(
+                    start,
+                    TransitionEvent::EndOfLine {
+                        crlf: *crlf,
+                    },
+                    end,
+                );
                 end
             }
             Atom::Alternation(branches) => {

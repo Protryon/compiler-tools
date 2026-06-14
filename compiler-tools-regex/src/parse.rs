@@ -16,8 +16,8 @@ const MAX_REPEAT: usize = 1024;
 /// line boundaries, modeled as the
 /// zero-width [`Atom::StartOfLine`]/[`Atom::EndOfLine`] assertions (the matcher
 /// loop evaluates them against the surrounding chars, like `\b`). The `R` (CRLF)
-/// flag is still *rejected* — it would need `\r\n` treated as a single line
-/// terminator, which this `\n`-only model can't yet represent.
+/// flag widens the line-terminator set those anchors use (and the chars `.`
+/// excludes) to `\r`, `\n` and the atomic `\r\n`.
 #[derive(Clone, Copy, Default)]
 struct Flags {
     /// `i` — ASCII case-insensitive. A cased literal/class member matches both cases.
@@ -35,11 +35,15 @@ struct Flags {
     /// `u` — Unicode mode: `\d \w \s` and `\b`/`\B` use Unicode definitions rather
     /// than ASCII. Defaults off (ASCII) so existing tokenizers are unchanged.
     unicode: bool,
+    /// `R` — CRLF mode: `\r`, `\n` and the atomic `\r\n` are all line terminators,
+    /// so under `(?m)` the `^`/`$` anchors treat them as one boundary (no split
+    /// inside `\r\n`) and `.` excludes `\r` as well as `\n`. Defaults off (`\n`-only).
+    crlf: bool,
 }
 
 /// Applies one flag letter to `flags`, setting it when `negate` is false and
-/// clearing it after a `-`. Returns `None` for an unsupported flag (`R`) or an
-/// unknown letter so the whole pattern is rejected rather than mis-parsed.
+/// clearing it after a `-`. Returns `None` for an unknown letter so the whole
+/// pattern is rejected rather than mis-parsed.
 fn apply_flag(flags: &mut Flags, c: char, negate: bool) -> Option<()> {
     let value = !negate;
     match c {
@@ -49,7 +53,7 @@ fn apply_flag(flags: &mut Flags, c: char, negate: bool) -> Option<()> {
         'U' => flags.swap_greedy = value,
         'm' => flags.multiline = value,
         'u' => flags.unicode = value,
-        // `R` (CRLF) needs `\r\n` treated as one line terminator — not yet modeled.
+        'R' => flags.crlf = value,
         _ => return None,
     }
     Some(())
@@ -253,7 +257,16 @@ fn extract_bindable(atoms: &mut Vec<AtomRepeat>) -> Option<Atom> {
             Some(Atom::Literal(c.to_string()))
         }
         Atom::Group(..) | Atom::Alternation(..) => Some(atoms.pop().unwrap().atom),
-        Atom::EndOfInput | Atom::WordBoundary { .. } | Atom::StartOfLine | Atom::EndOfLine => None,
+        Atom::EndOfInput
+        | Atom::WordBoundary {
+            ..
+        }
+        | Atom::StartOfLine {
+            ..
+        }
+        | Atom::EndOfLine {
+            ..
+        } => None,
     }
 }
 
@@ -635,12 +648,16 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool, mut flags: Flags) 
             // them to zero-width assertions the matcher loop evaluates against the
             // surrounding chars. These arms must precede the non-multiline ones below.
             '^' if !escaped && flags.multiline => atoms.push(AtomRepeat {
-                atom: Atom::StartOfLine,
+                atom: Atom::StartOfLine {
+                    crlf: flags.crlf,
+                },
                 repeat: Repeat::Once,
                 lazy: false,
             }),
             '$' if !escaped && flags.multiline => atoms.push(AtomRepeat {
-                atom: Atom::EndOfLine,
+                atom: Atom::EndOfLine {
+                    crlf: flags.crlf,
+                },
                 repeat: Repeat::Once,
                 lazy: false,
             }),
@@ -653,10 +670,13 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool, mut flags: Flags) 
                 lazy: false,
             }),
             '.' if !escaped => atoms.push(AtomRepeat {
-                // `.` matches any char except a newline, matching the `regex` crate;
-                // under `(?s)` (dot-all) an inverted *empty* class matches everything.
+                // `.` matches any char except a line terminator, matching the `regex`
+                // crate; under `(?s)` (dot-all) an inverted *empty* class matches
+                // everything, and under `(?R)` (CRLF) the excluded set adds `\r`.
                 atom: if flags.dot_matches_newline {
                     Atom::Group(true, vec![])
+                } else if flags.crlf {
+                    Atom::Group(true, vec![GroupEntry::Char('\n'), GroupEntry::Char('\r')])
                 } else {
                     Atom::Group(true, vec![GroupEntry::Char('\n')])
                 },
@@ -1038,13 +1058,46 @@ mod tests {
     fn multiline_flag_makes_caret_and_dollar_line_anchors() {
         // Under `(?m)`, `^`/`$` become zero-width line anchors anywhere in the pattern.
         let a = atoms("(?m)^a$");
-        assert!(matches!(a.first().unwrap().atom, Atom::StartOfLine));
-        assert!(matches!(a.last().unwrap().atom, Atom::EndOfLine));
+        assert!(matches!(
+            a.first().unwrap().atom,
+            Atom::StartOfLine {
+                crlf: false
+            }
+        ));
+        assert!(matches!(
+            a.last().unwrap().atom,
+            Atom::EndOfLine {
+                crlf: false
+            }
+        ));
         // A non-leading/non-trailing anchor is still a line anchor under `(?m)`.
         let mid = atoms("(?m)$a");
-        assert!(matches!(mid.first().unwrap().atom, Atom::EndOfLine));
+        assert!(matches!(
+            mid.first().unwrap().atom,
+            Atom::EndOfLine {
+                crlf: false
+            }
+        ));
         let mid = atoms("(?m)a^b");
-        assert!(matches!(mid[1].atom, Atom::StartOfLine));
+        assert!(matches!(
+            mid[1].atom,
+            Atom::StartOfLine {
+                crlf: false
+            }
+        ));
+        // `(?Rm)` marks the anchors CRLF-aware.
+        assert!(matches!(
+            atoms("(?Rm)^a$").first().unwrap().atom,
+            Atom::StartOfLine {
+                crlf: true
+            }
+        ));
+        assert!(matches!(
+            atoms("(?Rm)^a$").last().unwrap().atom,
+            Atom::EndOfLine {
+                crlf: true
+            }
+        ));
         // Without `(?m)`, behaviour is unchanged: leading `^` dropped, trailing `$`
         // is end-of-input, and a mid-pattern anchor stays literal.
         assert!(matches!(atoms("^a$").last().unwrap().atom, Atom::EndOfInput));
@@ -1107,11 +1160,35 @@ mod tests {
     #[test]
     fn word_boundaries_parse() {
         let b = atoms("\\bword\\b");
-        assert!(matches!(b.first().unwrap().atom, Atom::WordBoundary { negate: false, unicode: false }));
-        assert!(matches!(b.last().unwrap().atom, Atom::WordBoundary { negate: false, unicode: false }));
-        assert!(matches!(atoms("\\B")[0].atom, Atom::WordBoundary { negate: true, unicode: false }));
+        assert!(matches!(
+            b.first().unwrap().atom,
+            Atom::WordBoundary {
+                negate: false,
+                unicode: false
+            }
+        ));
+        assert!(matches!(
+            b.last().unwrap().atom,
+            Atom::WordBoundary {
+                negate: false,
+                unicode: false
+            }
+        ));
+        assert!(matches!(
+            atoms("\\B")[0].atom,
+            Atom::WordBoundary {
+                negate: true,
+                unicode: false
+            }
+        ));
         // `(?u)` marks the boundary Unicode-aware.
-        assert!(matches!(atoms("(?u)\\b")[0].atom, Atom::WordBoundary { negate: false, unicode: true }));
+        assert!(matches!(
+            atoms("(?u)\\b")[0].atom,
+            Atom::WordBoundary {
+                negate: false,
+                unicode: true
+            }
+        ));
     }
 
     #[test]
@@ -1217,7 +1294,7 @@ mod tests {
         assert!(SimpleRegexAst::parse("abc)").is_none()); // stray close
         assert!(SimpleRegexAst::parse("(?=x)").is_none()); // lookahead
         assert!(SimpleRegexAst::parse("(?<=x)").is_none()); // lookbehind
-        assert!(SimpleRegexAst::parse("(?R)x").is_none()); // CRLF: unmodellable
+        assert!(SimpleRegexAst::parse("(?R)x").is_some()); // CRLF: now supported
         assert!(SimpleRegexAst::parse("(?Q)x").is_none()); // unknown flag
         assert!(SimpleRegexAst::parse("(?ix").is_none()); // unterminated flag spec
     }

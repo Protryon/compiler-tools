@@ -16,7 +16,16 @@ fn atoms_could_capture_newline(atoms: &[AtomRepeat]) -> bool {
             entries_contain_newline != *inverted
         }
         // Zero-width assertions consume nothing.
-        Atom::EndOfInput | Atom::WordBoundary { .. } | Atom::StartOfLine | Atom::EndOfLine => false,
+        Atom::EndOfInput
+        | Atom::WordBoundary {
+            ..
+        }
+        | Atom::StartOfLine {
+            ..
+        }
+        | Atom::EndOfLine {
+            ..
+        } => false,
         Atom::Alternation(branches) => branches.iter().any(|branch| atoms_could_capture_newline(branch)),
     })
 }
@@ -191,9 +200,27 @@ fn eval_state(transitions: &[(super::nfa::TransitionEvent, u32)], prev: Option<c
     for (transition, target) in transitions {
         let holds = match transition {
             TransitionEvent::EndOfInput => c.is_none(),
-            TransitionEvent::EndOfLine => matches!(c, None | Some('\n')),
-            TransitionEvent::StartOfLine => matches!(prev, None | Some('\n')),
-            TransitionEvent::WordBoundary { negate, unicode } => (is_word(prev, *unicode) != is_word(c, *unicode)) != *negate,
+            // `$` under `(?m)`: end of input or before a line terminator. In CRLF mode
+            // the terminators are `\r`, `\n` and the atomic `\r\n`, so `$` holds before
+            // a `\r` or a lone `\n` but not between the `\r` and `\n` of a pair.
+            TransitionEvent::EndOfLine {
+                crlf: false,
+            } => matches!(c, None | Some('\n')),
+            TransitionEvent::EndOfLine {
+                crlf: true,
+            } => matches!(c, None | Some('\r')) || (c == Some('\n') && prev != Some('\r')),
+            // `^` under `(?m)`: start of input or after a line terminator. The CRLF rule
+            // mirrors `$`: after a `\n` or a lone `\r`, but not between the `\r` and `\n`.
+            TransitionEvent::StartOfLine {
+                crlf: false,
+            } => matches!(prev, None | Some('\n')),
+            TransitionEvent::StartOfLine {
+                crlf: true,
+            } => matches!(prev, None | Some('\n')) || (prev == Some('\r') && c != Some('\n')),
+            TransitionEvent::WordBoundary {
+                negate,
+                unicode,
+            } => (is_word(prev, *unicode) != is_word(c, *unicode)) != *negate,
             _ => false,
         };
         if holds {
@@ -490,7 +517,6 @@ mod tests {
         assert!(SimpleRegex::parse("abc)").is_none());
         assert!(SimpleRegex::parse("(?=foo)").is_none());
         assert!(SimpleRegex::parse("(?<=foo)bar").is_none());
-        assert!(SimpleRegex::parse("(?R)foo").is_none()); // CRLF: still unmodellable
     }
 
     #[test]
@@ -506,6 +532,37 @@ mod tests {
         assert_eq!(re.find_prefix("def", Some('x')), None);
         // `$` fires before a `\n` even when more input follows.
         assert_eq!(SimpleRegex::parse("(?m)[a-z]+$").unwrap().find_prefix("abc\nxyz", None), Some(("abc", "\nxyz")));
+    }
+
+    #[test]
+    fn crlf_multiline_anchors_treat_crlf_as_one_terminator() {
+        // `(?Rm)`: `\r`, `\n` and the atomic `\r\n` are all line terminators.
+        let end = SimpleRegex::parse("(?Rm)[a-z]+$").unwrap();
+        // `$` fires before the `\r` of a `\r\n` pair (not between the `\r` and `\n`).
+        assert_eq!(end.find_prefix("abc\r\nxyz", None), Some(("abc", "\r\nxyz")));
+        // `$` fires before a lone `\n` as well.
+        assert_eq!(end.find_prefix("abc\ndef", None), Some(("abc", "\ndef")));
+        // ...and before a lone `\r`.
+        assert_eq!(end.find_prefix("abc\rdef", None), Some(("abc", "\rdef")));
+
+        // `^` holds after the `\n` of a `\r\n` pair (prev seeded by the caller), but
+        // not between the `\r` and `\n`.
+        let start = SimpleRegex::parse("(?Rm)^[a-z]+").unwrap();
+        assert_eq!(start.find_prefix("xyz", Some('\n')), Some(("xyz", "")));
+        assert_eq!(start.find_prefix("xyz", Some('\r')), Some(("xyz", "")));
+        // Slice starting at the `\n` of a `\r\n` pair: `^` must NOT hold there.
+        assert_eq!(SimpleRegex::parse("(?Rm)^").unwrap().find_prefix("\nx", Some('\r')), None);
+    }
+
+    #[test]
+    fn crlf_dot_excludes_carriage_return() {
+        // Under `(?R)`, `.` excludes `\r` as well as `\n`.
+        let re = SimpleRegex::parse("(?R)a.").unwrap();
+        assert_eq!(re.find_prefix("a\rb", None), None);
+        assert_eq!(re.find_prefix("a\nb", None), None);
+        assert_eq!(re.find_prefix("axb", None), Some(("ax", "b")));
+        // Without `(?R)`, `.` still matches a `\r`.
+        assert_eq!(SimpleRegex::parse("a.").unwrap().find_prefix("a\rb", None), Some(("a\r", "b")));
     }
 
     #[test]
