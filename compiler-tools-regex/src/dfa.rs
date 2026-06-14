@@ -270,7 +270,9 @@ impl Dfa {
             let mut end_of_input: Closure = vec![];
             let mut end_of_line: Closure = vec![];
             let mut start_of_line: Closure = vec![];
-            let mut boundaries: [Closure; 2] = [vec![], vec![]];
+            // Word-boundary follow-ons, keyed by `negate as usize | (unicode as usize) << 1`
+            // so the ASCII and Unicode `\b`/`\B` variants stay distinct edges.
+            let mut boundaries: [Closure; 4] = [vec![], vec![], vec![], vec![]];
             let push_unique = |targets: &mut Closure, target: u32| {
                 if !targets.contains(&target) {
                     targets.push(target);
@@ -285,7 +287,9 @@ impl Dfa {
                         TransitionEvent::EndOfInput => push_unique(&mut end_of_input, *target),
                         TransitionEvent::EndOfLine => push_unique(&mut end_of_line, *target),
                         TransitionEvent::StartOfLine => push_unique(&mut start_of_line, *target),
-                        TransitionEvent::WordBoundary(negate) => push_unique(&mut boundaries[*negate as usize], *target),
+                        TransitionEvent::WordBoundary { negate, unicode } => {
+                            push_unique(&mut boundaries[*negate as usize | (*unicode as usize) << 1], *target)
+                        }
                         // The NFA never stores an explicit `End` edge.
                         TransitionEvent::End => {}
                     }
@@ -320,11 +324,13 @@ impl Dfa {
                 let target_id = wire(start_of_line, &mut interner, &mut worklist);
                 out.push((TransitionEvent::StartOfLine, target_id));
             }
-            for negate in [false, true] {
-                let targets = std::mem::take(&mut boundaries[negate as usize]);
-                if !targets.is_empty() {
-                    let target_id = wire(targets, &mut interner, &mut worklist);
-                    out.push((TransitionEvent::WordBoundary(negate), target_id));
+            for unicode in [false, true] {
+                for negate in [false, true] {
+                    let targets = std::mem::take(&mut boundaries[negate as usize | (unicode as usize) << 1]);
+                    if !targets.is_empty() {
+                        let target_id = wire(targets, &mut interner, &mut worklist);
+                        out.push((TransitionEvent::WordBoundary { negate, unicode }, target_id));
+                    }
                 }
             }
             // Accepting closure: offer an `End` edge to the sink. Truncation

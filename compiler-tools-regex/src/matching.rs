@@ -16,7 +16,7 @@ fn atoms_could_capture_newline(atoms: &[AtomRepeat]) -> bool {
             entries_contain_newline != *inverted
         }
         // Zero-width assertions consume nothing.
-        Atom::EndOfInput | Atom::WordBoundary(_) | Atom::StartOfLine | Atom::EndOfLine => false,
+        Atom::EndOfInput | Atom::WordBoundary { .. } | Atom::StartOfLine | Atom::EndOfLine => false,
         Atom::Alternation(branches) => branches.iter().any(|branch| atoms_could_capture_newline(branch)),
     })
 }
@@ -144,8 +144,18 @@ enum Step {
 }
 
 #[allow(dead_code)]
-fn is_word(ch: Option<char>) -> bool {
+fn is_word_ascii(ch: Option<char>) -> bool {
     matches!(ch, Some('0'..='9' | 'a'..='z' | 'A'..='Z' | '_'))
+}
+
+/// Word-ness of `ch` for a word-boundary assertion, ASCII or Unicode (`\w`); the
+/// input edges (`None`) count as non-word in both.
+#[allow(dead_code)]
+fn is_word(ch: Option<char>, unicode: bool) -> bool {
+    match ch {
+        Some(c) if unicode => crate::unicode::is_word(c),
+        other => is_word_ascii(other),
+    }
 }
 
 /// Evaluate one DFA state for the runtime interpreter, matching the priority the
@@ -183,7 +193,7 @@ fn eval_state(transitions: &[(super::nfa::TransitionEvent, u32)], prev: Option<c
             TransitionEvent::EndOfInput => c.is_none(),
             TransitionEvent::EndOfLine => matches!(c, None | Some('\n')),
             TransitionEvent::StartOfLine => matches!(prev, None | Some('\n')),
-            TransitionEvent::WordBoundary(negate) => (is_word(prev) != is_word(c)) != *negate,
+            TransitionEvent::WordBoundary { negate, unicode } => (is_word(prev, *unicode) != is_word(c, *unicode)) != *negate,
             _ => false,
         };
         if holds {
@@ -542,6 +552,22 @@ mod tests {
         // Negated `(?u)\D` excludes a Unicode digit.
         assert_eq!(SimpleRegex::parse(r"(?u)\D").unwrap().find_prefix("٧", None), None);
         assert_eq!(SimpleRegex::parse(r"(?u)\D").unwrap().find_prefix("x", None), Some(("x", "")));
+    }
+
+    #[test]
+    fn unicode_word_boundary_uses_unicode_word_ness() {
+        // ASCII `\b`: a non-ASCII letter is a non-word char, so `\bx` matches with a
+        // preceding `é` (an ASCII-word↔non-word transition sits between them).
+        let ascii = SimpleRegex::parse(r"\bfoo").unwrap();
+        assert_eq!(ascii.find_prefix("foo", Some('é')), Some(("foo", "")));
+        // Unicode `\b`: `é` is a word char, so there is no boundary before `foo`.
+        let uni = SimpleRegex::parse(r"(?u)\bfoo").unwrap();
+        assert_eq!(uni.find_prefix("foo", Some('é')), None);
+        // ...but there is a Unicode boundary after a non-word char.
+        assert_eq!(uni.find_prefix("foo", Some(' ')), Some(("foo", "")));
+        // `\B` is the complement: a Unicode `\B` holds between two word chars.
+        let nb = SimpleRegex::parse(r"(?u)\Bfoo").unwrap();
+        assert_eq!(nb.find_prefix("foo", Some('é')), Some(("foo", "")));
     }
 
     #[test]

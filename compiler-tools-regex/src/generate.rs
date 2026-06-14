@@ -21,10 +21,21 @@ impl SimpleRegex {
         // pattern with no `$`/`^`/`\b`.
         let mut needs_prev = false; // any `^`(?m)/`\b`/`\B` edge → we must track the previous char
         let mut has_zero_width = false; // any zero-width edge → keep the cycle guard + counter
+        let mut needs_word_ascii = false; // any ASCII `\b`/`\B` → emit `is_word_ascii`
+        let mut needs_word_unicode = false; // any Unicode `\b`/`\B` → emit `is_word_unicode` + table
         for transitions in self.dfa.transitions.values() {
             for (transition, _) in transitions {
                 match transition {
-                    nfa::TransitionEvent::StartOfLine | nfa::TransitionEvent::WordBoundary(_) => {
+                    nfa::TransitionEvent::WordBoundary { unicode, .. } => {
+                        needs_prev = true;
+                        has_zero_width = true;
+                        if *unicode {
+                            needs_word_unicode = true;
+                        } else {
+                            needs_word_ascii = true;
+                        }
+                    }
+                    nfa::TransitionEvent::StartOfLine => {
                         needs_prev = true;
                         has_zero_width = true;
                     }
@@ -33,6 +44,44 @@ impl SimpleRegex {
                 }
             }
         }
+
+        // The word-ness helpers are emitted once at the top of the generated fn (not
+        // per boundary arm): the Unicode table is large, so inlining it per arm would
+        // bloat the output. Each takes `Option<char>` (an input edge is non-word).
+        let is_word_fns = {
+            let ascii = needs_word_ascii.then(|| {
+                quote! {
+                    fn is_word_ascii(ch: Option<char>) -> bool {
+                        matches!(ch, Some('0'..='9' | 'a'..='z' | 'A'..='Z' | '_'))
+                    }
+                }
+            });
+            let unicode = needs_word_unicode.then(|| {
+                let ranges = crate::unicode::word_ranges().into_iter().map(|(lo, hi)| quote! { (#lo, #hi) });
+                let ranges = flatten(ranges.map(|r| quote! { #r, }));
+                quote! {
+                    fn is_word_unicode(ch: Option<char>) -> bool {
+                        // Sorted, disjoint `\w` codepoint ranges; membership by binary search.
+                        const RANGES: &[(char, char)] = &[ #ranges ];
+                        match ch {
+                            Some(c) => RANGES
+                                .binary_search_by(|&(lo, hi)| {
+                                    if c < lo {
+                                        ::core::cmp::Ordering::Greater
+                                    } else if c > hi {
+                                        ::core::cmp::Ordering::Less
+                                    } else {
+                                        ::core::cmp::Ordering::Equal
+                                    }
+                                })
+                                .is_ok(),
+                            None => false,
+                        }
+                    }
+                }
+            });
+            quote! { #ascii #unicode }
+        };
 
         // A zero-width move keeps the lookahead char and byte position, so a cycle of
         // them (e.g. `\b*`) can never extend the match; bound it by the state count.
@@ -56,7 +105,7 @@ impl SimpleRegex {
                 match transition {
                     nfa::TransitionEvent::Epsilon => unreachable!(),
                     nfa::TransitionEvent::End => is_accepting = true,
-                    nfa::TransitionEvent::WordBoundary(_)
+                    nfa::TransitionEvent::WordBoundary { .. }
                     | nfa::TransitionEvent::EndOfInput
                     | nfa::TransitionEvent::EndOfLine
                     | nfa::TransitionEvent::StartOfLine => zero_width.push((transition, *target)),
@@ -137,20 +186,25 @@ impl SimpleRegex {
             let fallback = if zero_width.is_empty() {
                 quote! { _ => break, }
             } else {
-                let needs_is_word = zero_width.iter().any(|(e, _)| matches!(e, nfa::TransitionEvent::WordBoundary(_)));
                 let mut chain = quote! { break };
                 for (event, target) in zero_width.iter().rev() {
                     let cond = match event {
                         nfa::TransitionEvent::EndOfInput => quote! { other.is_none() },
                         nfa::TransitionEvent::EndOfLine => quote! { matches!(other, None | Some('\n')) },
                         nfa::TransitionEvent::StartOfLine => quote! { matches!(prev, None | Some('\n')) },
-                        nfa::TransitionEvent::WordBoundary(negate) => {
+                        nfa::TransitionEvent::WordBoundary { negate, unicode } => {
+                            // Word-ness via the once-emitted helper for this boundary's mode.
+                            let is_word = if *unicode {
+                                quote! { is_word_unicode }
+                            } else {
+                                quote! { is_word_ascii }
+                            };
                             let cmp = if *negate {
                                 quote! { == }
                             } else {
                                 quote! { != }
                             };
-                            quote! { is_word(prev) #cmp is_word(other) }
+                            quote! { #is_word(prev) #cmp #is_word(other) }
                         }
                         _ => unreachable!(),
                     };
@@ -164,16 +218,8 @@ impl SimpleRegex {
                         }
                     };
                 }
-                let is_word_fn = needs_is_word.then(|| {
-                    quote! {
-                        fn is_word(ch: Option<char>) -> bool {
-                            matches!(ch, Some('0'..='9' | 'a'..='z' | 'A'..='Z' | '_'))
-                        }
-                    }
-                });
                 quote! {
                     other => {
-                        #is_word_fn
                         #chain
                     }
                 }
@@ -213,6 +259,9 @@ impl SimpleRegex {
             // assertions — `^` under `(?m)` and `\b` — so a slice taken mid-input still
             // sees the correct preceding context.
             fn #fn_name(from: &str, #prev_param: Option<char>) -> Option<(&str, &str)> {
+                // Word-ness helpers, emitted once for the whole matcher (only when a
+                // `\b`/`\B` of the matching mode is reachable).
+                #is_word_fns
                 let mut state = 0u32;
                 // Byte offset of the last accepting position; `usize::MAX` is the "none
                 // yet" sentinel (cheaper in the hot loop than an `Option`).

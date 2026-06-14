@@ -253,7 +253,7 @@ fn extract_bindable(atoms: &mut Vec<AtomRepeat>) -> Option<Atom> {
             Some(Atom::Literal(c.to_string()))
         }
         Atom::Group(..) | Atom::Alternation(..) => Some(atoms.pop().unwrap().atom),
-        Atom::EndOfInput | Atom::WordBoundary(_) | Atom::StartOfLine | Atom::EndOfLine => None,
+        Atom::EndOfInput | Atom::WordBoundary { .. } | Atom::StartOfLine | Atom::EndOfLine => None,
     }
 }
 
@@ -710,12 +710,18 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool, mut flags: Flags) 
                             }),
                             'z' => return None,
                             'b' => atoms.push(AtomRepeat {
-                                atom: Atom::WordBoundary(false),
+                                atom: Atom::WordBoundary {
+                                    negate: false,
+                                    unicode: flags.unicode,
+                                },
                                 repeat: Repeat::Once,
                                 lazy: false,
                             }),
                             'B' => atoms.push(AtomRepeat {
-                                atom: Atom::WordBoundary(true),
+                                atom: Atom::WordBoundary {
+                                    negate: true,
+                                    unicode: flags.unicode,
+                                },
                                 repeat: Repeat::Once,
                                 lazy: false,
                             }),
@@ -1101,9 +1107,11 @@ mod tests {
     #[test]
     fn word_boundaries_parse() {
         let b = atoms("\\bword\\b");
-        assert!(matches!(b.first().unwrap().atom, Atom::WordBoundary(false)));
-        assert!(matches!(b.last().unwrap().atom, Atom::WordBoundary(false)));
-        assert!(matches!(atoms("\\B")[0].atom, Atom::WordBoundary(true)));
+        assert!(matches!(b.first().unwrap().atom, Atom::WordBoundary { negate: false, unicode: false }));
+        assert!(matches!(b.last().unwrap().atom, Atom::WordBoundary { negate: false, unicode: false }));
+        assert!(matches!(atoms("\\B")[0].atom, Atom::WordBoundary { negate: true, unicode: false }));
+        // `(?u)` marks the boundary Unicode-aware.
+        assert!(matches!(atoms("(?u)\\b")[0].atom, Atom::WordBoundary { negate: false, unicode: true }));
     }
 
     #[test]

@@ -101,6 +101,40 @@ pub fn perl_class(escape: char) -> Option<Vec<GroupEntry>> {
     }
 }
 
+/// The Unicode `\w` word-character set as sorted, disjoint `(lo, hi)` codepoint
+/// ranges. Used to evaluate Unicode `\b`/`\B` word-ness: the interpreter binary-
+/// searches the cached table ([`is_word`]), and the code generator embeds the same
+/// ranges as a `const` so the generated matcher needs no runtime dependency.
+pub fn word_ranges() -> Vec<(char, char)> {
+    perl_class('w')
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| match entry {
+            GroupEntry::Char(c) => (c, c),
+            GroupEntry::Range(lo, hi) => (lo, hi),
+        })
+        .collect()
+}
+
+/// Whether `ch` is a Unicode `\w` word character (used by the runtime interpreter's
+/// Unicode `\b`). Binary-searches a once-computed copy of [`word_ranges`].
+pub fn is_word(ch: char) -> bool {
+    use std::sync::OnceLock;
+    static RANGES: OnceLock<Vec<(char, char)>> = OnceLock::new();
+    RANGES
+        .get_or_init(word_ranges)
+        .binary_search_by(|&(lo, hi)| {
+            if ch < lo {
+                std::cmp::Ordering::Greater
+            } else if ch > hi {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

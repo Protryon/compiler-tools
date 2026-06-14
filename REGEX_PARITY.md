@@ -10,23 +10,27 @@ crate at runtime.
 
 ## Gaps
 
+Unicode coverage is broad now and all built on the same idea — the engine is
+already codepoint-based, so Unicode features expand into the existing range model
+using `regex-syntax`'s tables at build time (see `unicode.rs`), with no runtime
+dependency. Supported: `\p{...}`/`\P{...}` property classes, Unicode `\d \w \s`
+(and negated `\D \W \S`, including inside a `[...]` class), `(?iu)` simple case
+folding, and Unicode `\b`/`\B` word-ness. The engine defaults to ASCII (fast
+tokenizers) and opts into Unicode with `(?u)`; the conformance harness sets it
+where the corpus expects it.
+
 ### Anchors & boundaries
 - **CRLF line terminator** — `(?R)`, treating `\r\n` as a single line terminator
   for `^`/`$`/`.`. Rejected at parse time; the line-anchor model is `\n`-only.
   Custom (non-`\n`) line terminators are likewise unsupported.
-- **ASCII word boundaries are non-backtracking** — a `\b` that would require
+- **Directional half-boundaries** — `\b{start}`, `\b{end}`, `\b{start-half}`,
+  `\b{end-half}`. A separate assertion type from plain `\b`; not parsed.
+- **Word boundaries are non-backtracking** — a `\b` that would require
   *un*-consuming a greedy match (e.g. `.*\bx`) won't match where the `regex`
-  crate would. `\bword\b`-style usage is fine.
+  crate would. `\bword\b`-style usage is fine. (Independent of ASCII vs Unicode.)
 
 ### Character classes
 - **POSIX classes** — `[[:alpha:]]`, etc.
-- **Unicode word boundaries** — `\b`/`\B` word-ness is still ASCII (`[0-9A-Za-z_]`)
-  even under `(?u)`. The class side is done: `\p{...}`/`\P{...}` property classes,
-  Unicode `\d \w \s` (and negated `\D \W \S`, including inside a `[...]` class), and
-  `(?iu)` simple case folding all resolve to codepoint ranges at build time via
-  `regex-syntax` (see `unicode.rs`). The engine defaults to ASCII (fast tokenizers)
-  and opts into Unicode with `(?u)`; the conformance harness sets it where the
-  corpus expects it.
 
 ### Escapes
 - **Octal escapes** — `\123`, `\o{...}`. (Hex/codepoint escapes *are* supported.)
@@ -56,21 +60,23 @@ generated matcher stay in lock-step):
 | | runtime interpreter | compiled-rust engine |
 |---|---|---|
 | total | 1184 | 1184 |
-| pass | 759 | 759 |
+| pass | 767 | 767 |
 | fail-to-parse | 108 | 108 |
-| fail-to-pass | 243 | 243 |
+| fail-to-pass | 235 | 235 |
 | skipped | 74 | 74 |
-| per search | ~3.1 µs | ~2.2 µs |
+| per search | ~3.3 µs | ~2.2 µs |
 
-Progression, all pure parse-time range expansions (the engine is already
-codepoint-based): `\p{…}` property classes 682 → 748, `(?iu)` Unicode simple case
-folding 748 → 752, Unicode `\d \w \s` + negated-shorthand-in-class 752 → 759.
+Progression — the engine is already codepoint-based, so the class-side Unicode
+features are pure parse-time range expansions: `\p{…}` property classes 682 → 748,
+`(?iu)` Unicode simple case folding 748 → 752, Unicode `\d \w \s` +
+negated-shorthand-in-class 752 → 759, and Unicode `\b`/`\B` word-ness (the one
+matcher-side change — a shared word-range table in both engines) 759 → 767.
 
 The remaining failures cluster into the gaps above:
 
 | bucket | ~tests | notes |
 |---|---|---|
-| Unicode word boundaries (`\b`/`\B`) | ~100–150 | dominates fail-to-pass; needs Unicode `\w` word-ness in the matcher loop (a shared range-set test in both engines) |
-| ASCII word-boundary correctness | ~30–60 | a subset is pure-ASCII and fixable without Unicode (zero-width `\b` empty matches, `.*\bx` non-backtracking) |
+| Directional half-boundaries (`\b{start}`/`\b{end}`/…) | ~70 | a distinct assertion type the parser doesn't yet recognise (both ASCII and Unicode variants) |
+| Word-boundary non-backtracking + zero-width empty matches | ~15 | a `\b` requiring an un-consumed greedy match (`.*\bx`) or an empty match at a string/word edge; independent of Unicode |
 | CRLF / `(?R)` + custom line terminators | ~40 | reuses the `prev`/lookahead machinery but must treat `\r\n` as one terminator |
-| POSIX classes | small | self-contained change to `parse.rs`'s group model |
+| POSIX classes, octal escapes | small | self-contained changes to `parse.rs` |

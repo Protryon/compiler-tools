@@ -53,11 +53,12 @@ pub enum Atom {
     /// always matches a prefix from the current position, so a leading `^` / `\A`
     /// is a no-op and is dropped at parse time.
     EndOfInput,
-    /// A zero-width word-boundary assertion (`\b` when `false`, `\B` when `true`).
-    /// Holds when the word-ness (`[0-9A-Za-z_]`, ASCII) of the previous and next
-    /// characters differ (`\b`) or match (`\B`); the edges of the input count as
-    /// non-word. Consumes nothing.
-    WordBoundary(bool),
+    /// A zero-width word-boundary assertion (`\b` when `negate` is `false`, `\B` when
+    /// `true`). Holds when the word-ness of the previous and next characters differ
+    /// (`\b`) or match (`\B`); the edges of the input count as non-word. Consumes
+    /// nothing. `unicode` (set by `(?u)`) selects Unicode `\w` word-ness over the
+    /// default ASCII `[0-9A-Za-z_]`.
+    WordBoundary { negate: bool, unicode: bool },
     /// A zero-width multiline start-of-line assertion: `^` under `(?m)`. Holds at
     /// the start of the input or immediately after a `\n`. Only emitted when the
     /// multiline flag is set; otherwise a leading `^` is dropped (see `parse.rs`).
