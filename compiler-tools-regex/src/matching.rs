@@ -235,9 +235,9 @@ fn zero_width_holds(transition: &super::nfa::TransitionEvent, prev: Option<char>
             crlf: true,
         } => matches!(prev, None | Some('\n')) || (prev == Some('\r') && c != Some('\n')),
         TransitionEvent::WordBoundary {
-            negate,
+            kind,
             unicode,
-        } => (is_word(prev, *unicode) != is_word(c, *unicode)) != *negate,
+        } => kind.holds(is_word(prev, *unicode), is_word(c, *unicode)),
         _ => false,
     }
 }
@@ -619,6 +619,35 @@ mod tests {
         // backs off to `fo`, whose `\B` holds between the two `o`s.
         let re = SimpleRegex::parse("(?:fo|foo)\\B").unwrap();
         assert_eq!(re.find_prefix("foo", Some('x')), Some(("fo", "o")));
+    }
+
+    #[test]
+    fn directional_half_boundaries_constrain_one_side() {
+        // `\b{start}`: non-word (or edge) on the left, word char on the right — so it
+        // gates the start of a word but not its end.
+        let start = SimpleRegex::parse("\\b{start}[a-z]+").unwrap();
+        assert_eq!(start.find_prefix("foo", None), Some(("foo", "")));
+        // Preceding word char ⇒ not a start-of-word, so the assertion fails.
+        assert_eq!(start.find_prefix("foo", Some('x')), None);
+
+        // `\b{end}`: word char on the left, non-word (or edge) on the right.
+        let end = SimpleRegex::parse("[a-z]+\\b{end}").unwrap();
+        // Greedy run reaches the word/non-word edge before the space and backs off there.
+        assert_eq!(end.find_prefix("foo bar", None), Some(("foo", " bar")));
+
+        // `\b{start-half}`: only the left side must be non-word — a zero-width match
+        // holds at start of text and before a word char, but NOT after a word char.
+        let half = SimpleRegex::parse("\\b{start-half}").unwrap();
+        assert_eq!(half.find_prefix("x", None), Some(("", "x")));
+        assert_eq!(half.find_prefix("x", Some(' ')), Some(("", "x")));
+        assert_eq!(half.find_prefix("x", Some('w')), None);
+
+        // `\b{end-half}`: only the right side must be non-word — holds at end of text
+        // and before a non-word char, but not before a word char.
+        let endhalf = SimpleRegex::parse("\\b{end-half}").unwrap();
+        assert_eq!(endhalf.find_prefix("", Some('w')), Some(("", "")));
+        assert_eq!(endhalf.find_prefix(" x", Some('w')), Some(("", " x")));
+        assert_eq!(endhalf.find_prefix("x", Some(' ')), None);
     }
 
     #[test]

@@ -24,8 +24,6 @@ where the corpus expects it.
   `\r`/`\n`/`\r\n`. The `regex` crate lets you set an arbitrary terminator byte;
   this engine only models the `\n` and CRLF sets. (CRLF itself — `(?R)`, treating
   `\r\n` as a single terminator for `^`/`$`/`.` — *is* supported now.)
-- **Directional half-boundaries** — `\b{start}`, `\b{end}`, `\b{start-half}`,
-  `\b{end-half}`. A separate assertion type from plain `\b`; not parsed.
 - **A zero-width assertion that must expose a *further consuming* match in
   parallel with a live greedy thread** — e.g. `.*\bx` on `"x"`, where `.*` could
   consume the `x` *or* leave it for `\bx`. The single-thread DFA walk follows the
@@ -68,11 +66,11 @@ generated matcher stay in lock-step):
 | | runtime interpreter | compiled-rust engine |
 |---|---|---|
 | total | 1184 | 1184 |
-| pass | 868 | 868 |
+| pass | 941 | 941 |
 | fail-to-parse | 0 | 0 |
-| fail-to-pass | 242 | 242 |
+| fail-to-pass | 169 | 169 |
 | skipped | 74 | 74 |
-| per search | ~7.5 µs | ~2.3 µs |
+| per search | ~6.7 µs | ~2.3 µs |
 
 Progression — the engine is already codepoint-based, so the class-side Unicode
 features are pure parse-time range expansions: `\p{…}` property classes 682 → 748,
@@ -87,14 +85,17 @@ end-of-text anchors — modelling `^`/`\A` as a real `prev`-is-`None` assertion
 anywhere (not just trailing), so a search honours them at every position — lifted
 827 → 865. Assertion-gated greedy backoff — recording an accept reachable through
 zero-width assertions that hold at the current position, so `.+\b`/`\B…\B` back
-off to it — 865 → 868.
+off to it — 865 → 868. Directional half-boundaries — `\b{start}`/`\b{end}`/
+`\b{start-half}`/`\b{end-half}`, folded into the existing word-boundary assertion as
+a `WordBoundaryKind` (each kind a boolean condition over the word-ness of `prev`/
+lookahead), so they reuse the same DFA edge, matcher loop and codegen as plain
+`\b`/`\B` — 868 → 941.
 
 The remaining failures cluster into the gaps above:
 
 | bucket | ~tests | notes |
 |---|---|---|
-| Directional half-boundaries (`\b{start}`/`\b{end}`/…) | ~70 | a distinct assertion type the parser doesn't yet recognise (both ASCII and Unicode variants) |
 | Assertion in parallel with a live greedy thread | ~2 | a `\b` that must expose a *further consuming* match the greedy thread could also take (`.*\bx`), or a zero-width branch that must out-prioritise a consuming one (`(?:\b|%)+`); needs a multi-thread step. (The accept-backoff and `^`/`$`/`\A`/`\z` cases are now handled.) |
-| Bytes-mode word boundaries at non-char-boundaries | ~1 | `\B` matches inside a multi-byte char in a `utf8=false` haystack; unrepresentable in this `&str`-based engine |
+| Bytes-mode word boundaries at non-char-boundaries | small | `\B`/`\b{…}` matching inside a multi-byte char in a `utf8=false` haystack; unrepresentable in this `&str`-based engine |
 | Custom (non-`\n`/CRLF) line terminators | small | the `regex` crate's arbitrary-terminator option; the `\n` and `(?R)` CRLF sets are modeled |
 | POSIX classes, octal escapes | small | self-contained changes to `parse.rs` |

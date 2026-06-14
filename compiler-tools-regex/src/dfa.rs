@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use super::GroupEntry;
 use super::nfa::{Nfa, TransitionEvent};
+use super::{GroupEntry, WordBoundaryKind};
 
 /// An ordered, de-duplicated set of NFA states — the key for a DFA state. The
 /// order is **thread priority** (highest first); see [`ordered_closure`].
@@ -273,9 +273,11 @@ impl Dfa {
             // (a pattern can mix them with scoped `(?R)`) stay distinct edges.
             let mut end_of_line: [Closure; 2] = [vec![], vec![]];
             let mut start_of_line: [Closure; 2] = [vec![], vec![]];
-            // Word-boundary follow-ons, keyed by `negate as usize | (unicode as usize) << 1`
-            // so the ASCII and Unicode `\b`/`\B` variants stay distinct edges.
-            let mut boundaries: [Closure; 4] = [vec![], vec![], vec![], vec![]];
+            // Word-boundary follow-ons, keyed by `(kind, unicode)` so each distinct
+            // boundary assertion (plain `\b`/`\B`, the directional half-boundaries, and
+            // their ASCII/Unicode variants) keeps its own edge. Sorted iteration order
+            // gives a deterministic priority both engines read back.
+            let mut boundaries: BTreeMap<(WordBoundaryKind, bool), Closure> = BTreeMap::new();
             let push_unique = |targets: &mut Closure, target: u32| {
                 if !targets.contains(&target) {
                     targets.push(target);
@@ -296,9 +298,9 @@ impl Dfa {
                             crlf,
                         } => push_unique(&mut start_of_line[*crlf as usize], *target),
                         TransitionEvent::WordBoundary {
-                            negate,
+                            kind,
                             unicode,
-                        } => push_unique(&mut boundaries[*negate as usize | (*unicode as usize) << 1], *target),
+                        } => push_unique(boundaries.entry((*kind, *unicode)).or_default(), *target),
                         // The NFA never stores an explicit `End` edge.
                         TransitionEvent::End => {}
                     }
@@ -353,19 +355,16 @@ impl Dfa {
                     ));
                 }
             }
-            for unicode in [false, true] {
-                for negate in [false, true] {
-                    let targets = std::mem::take(&mut boundaries[negate as usize | (unicode as usize) << 1]);
-                    if !targets.is_empty() {
-                        let target_id = wire(targets, &mut interner, &mut worklist);
-                        out.push((
-                            TransitionEvent::WordBoundary {
-                                negate,
-                                unicode,
-                            },
-                            target_id,
-                        ));
-                    }
+            for ((kind, unicode), targets) in boundaries {
+                if !targets.is_empty() {
+                    let target_id = wire(targets, &mut interner, &mut worklist);
+                    out.push((
+                        TransitionEvent::WordBoundary {
+                            kind,
+                            unicode,
+                        },
+                        target_id,
+                    ));
                 }
             }
             // Accepting closure: offer an `End` edge to the sink. Truncation

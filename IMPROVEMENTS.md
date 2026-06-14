@@ -40,19 +40,28 @@ non-ASCII source this yields misleading column numbers. The newline column math 
 correct in *bytes*; converting to character columns is a separate, larger change that
 touches all four span-emission sites.
 
-## Custom regex engine features
+## Performance
 
-### 5. Alternation and grouping
-The custom `#[token(regex = ...)]` engine supports literals, classes/ranges, negation,
-`.`, and `* + ?`, but has **no alternation or grouping** — users are forced onto the
-slower `regex_full` (the `regex` crate) for those. Adding `(...)` groups and `a|b`
-alternation to `simple_regex/parse.rs` + `nfa.rs` would let more grammars stay on the
-fast, allocation-free path. Most-requested feature, largest effort.
+### 10. Runtime interpreter (`find_prefix`) regressed ~2x from assertion-gated accepts
+Adding assertion-gated greedy backoff (`.+\b` / `\B(?:fo|foo)\B`) made the runtime
+interpreter call `accepts_via_assertions` at the top of every loop iteration, which
+roughly doubled its per-search time in the conformance harness (~3.3 µs → ~6.6 µs).
+A fast-path guard (`matching.rs`, `accepts_via_assertions`) already returns early for
+states with no zero-width edge, but it still re-scans the state's transitions for a
+zero-width edge every iteration, and the slow path allocates a `HashSet`/`Vec` per call.
 
-### 6. Named character classes
-`simple_regex/mod.rs` already carries a `// TODO: we should support classes (i.e.
-unicode ident_start)`. Shorthands like `\d \w \s` (and ideally Unicode classes such as
-`ident_start`/`ident_continue`) would remove a lot of verbose `[a-zA-Z0-9_]` patterns.
+Scope: this is the **runtime DFA interpreter only** (`SimpleRegex::find_prefix`), which
+is exercised by the `regex-conformance` harness — **not** the compiled-Rust matcher
+that `#[token(regex = ...)]` actually emits (`generate.rs`), whose accept conditions are
+precomputed at build time and which stayed at ~2.2 µs/search. So the regression has no
+production impact today; it only matters if `find_prefix` ever becomes a hot path.
+
+Ideas: precompute per state (once, at DFA build) whether it has any zero-width edge and
+whether any zero-width path can reach an accept, so the hot loop does an O(1) check and
+only walks when it can pay off; and avoid the `HashSet` (states are few — a small
+stack-allocated visited set or a depth bound suffices). See `matching.rs`
+(`accepts_via_assertions`) and the build-time analog `zero_width_accept_conditions` in
+`generate.rs`.
 
 ## Macro diagnostics (polish)
 

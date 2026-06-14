@@ -43,6 +43,46 @@ pub enum GroupEntry {
     Range(char, char),
 }
 
+/// The variety of word-boundary assertion. Plain `\b`/`\B` test both sides; the four
+/// directional forms (from the `\b{...}` syntax the `regex` crate accepts) constrain
+/// one or both sides. Each maps to a boolean condition over the word-ness of the
+/// preceding and following characters (input edges count as non-word) — see [`Self::holds`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WordBoundaryKind {
+    /// `\b`: the two sides have differing word-ness.
+    Both,
+    /// `\B`: the two sides have matching word-ness.
+    BothNegate,
+    /// `\b{start}`: a non-word (or edge) on the left, a word char on the right.
+    Start,
+    /// `\b{end}`: a word char on the left, a non-word (or edge) on the right.
+    End,
+    /// `\b{start-half}`: a non-word (or edge) on the left; the right is unconstrained.
+    StartHalf,
+    /// `\b{end-half}`: a non-word (or edge) on the right; the left is unconstrained.
+    EndHalf,
+}
+
+impl WordBoundaryKind {
+    /// Whether the boundary holds, given the word-ness of the previous and next chars.
+    pub fn holds(self, prev_word: bool, next_word: bool) -> bool {
+        match self {
+            WordBoundaryKind::Both => prev_word != next_word,
+            WordBoundaryKind::BothNegate => prev_word == next_word,
+            WordBoundaryKind::Start => !prev_word && next_word,
+            WordBoundaryKind::End => prev_word && !next_word,
+            WordBoundaryKind::StartHalf => !prev_word,
+            WordBoundaryKind::EndHalf => !next_word,
+        }
+    }
+
+    /// Whether the condition inspects the *previous* char. `end-half` looks only at the
+    /// next char, so a matcher built solely from it needn't track `prev`.
+    pub fn reads_prev(self) -> bool {
+        !matches!(self, WordBoundaryKind::EndHalf)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Atom {
     Literal(String),
@@ -57,13 +97,14 @@ pub enum Atom {
     /// `^`/`\A` always holds there (a no-op); it matters for a mid-haystack search,
     /// where the slice can begin after other text.
     StartOfText,
-    /// A zero-width word-boundary assertion (`\b` when `negate` is `false`, `\B` when
-    /// `true`). Holds when the word-ness of the previous and next characters differ
-    /// (`\b`) or match (`\B`); the edges of the input count as non-word. Consumes
-    /// nothing. `unicode` (set by `(?u)`) selects Unicode `\w` word-ness over the
-    /// default ASCII `[0-9A-Za-z_]`.
+    /// A zero-width word-boundary assertion. `kind` selects plain `\b`/`\B` or one of
+    /// the directional half-boundaries (`\b{start}`/`\b{end}`/`\b{start-half}`/
+    /// `\b{end-half}`); see [`WordBoundaryKind`] for the per-kind condition. Holds based
+    /// on the word-ness of the previous and next characters (the input edges count as
+    /// non-word) and consumes nothing. `unicode` (set by `(?u)`) selects Unicode `\w`
+    /// word-ness over the default ASCII `[0-9A-Za-z_]`.
     WordBoundary {
-        negate: bool,
+        kind: WordBoundaryKind,
         unicode: bool,
     },
     /// A zero-width multiline start-of-line assertion: `^` under `(?m)`. Holds at

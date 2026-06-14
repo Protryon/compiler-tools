@@ -319,6 +319,29 @@ fn consume_lazy(iter: &mut std::str::Chars) -> bool {
     }
 }
 
+/// Just after a `\b`, try to consume a directional `{...}` directive
+/// (`{start}`/`{end}`/`{start-half}`/`{end-half}`) and return the matching
+/// [`WordBoundaryKind`]. On anything else — no brace, or an unrecognised body — the
+/// iterator is left untouched and `None` is returned, so the `\b` stays a plain
+/// boundary and the following text parses normally.
+fn parse_boundary_directive(iter: &mut std::str::Chars) -> Option<WordBoundaryKind> {
+    let mut probe = iter.clone();
+    if probe.next() != Some('{') {
+        return None;
+    }
+    let body: String = probe.by_ref().take_while(|&c| c != '}').collect();
+    let kind = match body.as_str() {
+        "start" => WordBoundaryKind::Start,
+        "end" => WordBoundaryKind::End,
+        "start-half" => WordBoundaryKind::StartHalf,
+        "end-half" => WordBoundaryKind::EndHalf,
+        _ => return None,
+    };
+    // Commit: advance the real iterator past `{body}`.
+    *iter = probe;
+    Some(kind)
+}
+
 fn parse_group(iter: &mut impl Iterator<Item = char>, flags: Flags) -> Option<Atom> {
     let mut group_entries = vec![];
     let mut escaped = false;
@@ -739,9 +762,13 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool, mut flags: Flags) 
                                 repeat: Repeat::Once,
                                 lazy: false,
                             }),
+                            // `\b` is a plain word boundary, unless followed by a
+                            // `{start}`/`{end}`/`{start-half}`/`{end-half}` directive that
+                            // makes it directional. An unrecognised `{...}` leaves `\b`
+                            // plain and falls through to normal parsing (`{` as a literal).
                             'b' => atoms.push(AtomRepeat {
                                 atom: Atom::WordBoundary {
-                                    negate: false,
+                                    kind: parse_boundary_directive(iter).unwrap_or(WordBoundaryKind::Both),
                                     unicode: flags.unicode,
                                 },
                                 repeat: Repeat::Once,
@@ -749,7 +776,7 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool, mut flags: Flags) 
                             }),
                             'B' => atoms.push(AtomRepeat {
                                 atom: Atom::WordBoundary {
-                                    negate: true,
+                                    kind: WordBoundaryKind::BothNegate,
                                     unicode: flags.unicode,
                                 },
                                 repeat: Repeat::Once,
@@ -1181,21 +1208,21 @@ mod tests {
         assert!(matches!(
             b.first().unwrap().atom,
             Atom::WordBoundary {
-                negate: false,
+                kind: WordBoundaryKind::Both,
                 unicode: false
             }
         ));
         assert!(matches!(
             b.last().unwrap().atom,
             Atom::WordBoundary {
-                negate: false,
+                kind: WordBoundaryKind::Both,
                 unicode: false
             }
         ));
         assert!(matches!(
             atoms("\\B")[0].atom,
             Atom::WordBoundary {
-                negate: true,
+                kind: WordBoundaryKind::BothNegate,
                 unicode: false
             }
         ));
@@ -1203,8 +1230,43 @@ mod tests {
         assert!(matches!(
             atoms("(?u)\\b")[0].atom,
             Atom::WordBoundary {
-                negate: false,
+                kind: WordBoundaryKind::Both,
                 unicode: true
+            }
+        ));
+    }
+
+    #[test]
+    fn directional_half_boundaries_parse() {
+        use WordBoundaryKind::*;
+        for (pat, want) in [
+            ("\\b{start}", Start),
+            ("\\b{end}", End),
+            ("\\b{start-half}", StartHalf),
+            ("\\b{end-half}", EndHalf),
+        ] {
+            let a = atoms(pat);
+            assert_eq!(a.len(), 1, "{pat}");
+            assert!(matches!(a[0].atom, Atom::WordBoundary { kind, .. } if kind == want), "{pat}");
+        }
+        // A directive followed by more pattern keeps both: `\b{start}x`.
+        let a = atoms("\\b{start}x");
+        assert!(matches!(
+            a[0].atom,
+            Atom::WordBoundary {
+                kind: WordBoundaryKind::Start,
+                ..
+            }
+        ));
+        assert!(matches!(a[1].atom, Atom::Literal(ref l) if l == "x"));
+        // An unrecognised brace leaves a plain `\b` and parses `{2}` as a count on it
+        // (which, applied to a zero-width atom, is a no-op repeat) — but crucially the
+        // boundary stays `Both`, not a directional kind.
+        assert!(matches!(
+            atoms("\\b{2}")[0].atom,
+            Atom::WordBoundary {
+                kind: WordBoundaryKind::Both,
+                ..
             }
         ));
     }

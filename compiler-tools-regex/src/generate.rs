@@ -27,10 +27,12 @@ impl SimpleRegex {
             for (transition, _) in transitions {
                 match transition {
                     nfa::TransitionEvent::WordBoundary {
+                        kind,
                         unicode,
-                        ..
                     } => {
-                        needs_prev = true;
+                        // `end-half` reads only the lookahead, so it alone doesn't force
+                        // tracking `prev` (which would otherwise warn as a dead write).
+                        needs_prev |= kind.reads_prev();
                         has_zero_width = true;
                         if *unicode {
                             needs_word_unicode = true;
@@ -424,7 +426,7 @@ fn zw_cond(event: &nfa::TransitionEvent, look: &TokenStream) -> TokenStream {
             crlf: true,
         } => quote! { (matches!(prev, None | Some('\n')) || (prev == Some('\r') && #look != Some('\n'))) },
         nfa::TransitionEvent::WordBoundary {
-            negate,
+            kind,
             unicode,
         } => {
             // Word-ness via the once-emitted helper for this boundary's mode.
@@ -433,12 +435,16 @@ fn zw_cond(event: &nfa::TransitionEvent, look: &TokenStream) -> TokenStream {
             } else {
                 quote! { is_word_ascii }
             };
-            let cmp = if *negate {
-                quote! { == }
-            } else {
-                quote! { != }
-            };
-            quote! { (#is_word(prev) #cmp #is_word(#look)) }
+            let p = quote! { #is_word(prev) };
+            let n = quote! { #is_word(#look) };
+            match kind {
+                WordBoundaryKind::Both => quote! { (#p != #n) },
+                WordBoundaryKind::BothNegate => quote! { (#p == #n) },
+                WordBoundaryKind::Start => quote! { (!#p && #n) },
+                WordBoundaryKind::End => quote! { (#p && !#n) },
+                WordBoundaryKind::StartHalf => quote! { (!#p) },
+                WordBoundaryKind::EndHalf => quote! { (!#n) },
+            }
         }
         nfa::TransitionEvent::Epsilon | nfa::TransitionEvent::Char(_) | nfa::TransitionEvent::Chars(..) | nfa::TransitionEvent::End => {
             unreachable!("not a zero-width assertion")

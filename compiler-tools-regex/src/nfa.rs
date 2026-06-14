@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use super::{Atom, AtomRepeat, GroupEntry, Repeat, SimpleRegexAst};
+use super::{Atom, AtomRepeat, GroupEntry, Repeat, SimpleRegexAst, WordBoundaryKind};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TransitionEvent {
@@ -13,10 +13,10 @@ pub enum TransitionEvent {
     /// Zero-width `^` / `\A` (non-multiline start-of-text) assertion: only taken at
     /// the very start of the input (the previous char is `None`).
     StartOfText,
-    /// Zero-width word-boundary assertion (`\b` / `\B`); `negate` flips it and
-    /// `unicode` selects Unicode `\w` word-ness over ASCII.
+    /// Zero-width word-boundary assertion; `kind` selects plain `\b`/`\B` or a
+    /// directional half-boundary and `unicode` selects Unicode `\w` word-ness over ASCII.
     WordBoundary {
-        negate: bool,
+        kind: WordBoundaryKind,
         unicode: bool,
     },
     /// Zero-width multiline start-of-line assertion (`^` under `(?m)`): taken at the
@@ -195,14 +195,14 @@ impl Builder {
                 end
             }
             Atom::WordBoundary {
-                negate,
+                kind,
                 unicode,
             } => {
                 let end = self.new_state();
                 self.edge(
                     start,
                     TransitionEvent::WordBoundary {
-                        negate: *negate,
+                        kind: *kind,
                         unicode: *unicode,
                     },
                     end,
