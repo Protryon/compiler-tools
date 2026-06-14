@@ -12,3 +12,8 @@ rust-version = "1.85.0"
 [dependencies]
 quote = "1.0"
 proc-macro2 = "1.0"
+# Build-time only: the regex crate's own parser, used purely as an authoritative
+# source of Unicode tables (property classes, case folding). This engine runs at
+# macro-expansion / build time, so `regex-syntax` never reaches the runtime crate —
+# generated matchers stay plain codepoint-range checks with no Unicode dependency.
+regex-syntax = "0.8"

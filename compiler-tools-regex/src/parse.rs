@@ -9,9 +9,11 @@ const MAX_REPEAT: usize = 1024;
 /// are scoped: a bare `(?flags)` directive mutates the flags for the rest of the
 /// enclosing group, while a `(?flags:...)` group applies them only to its body.
 ///
-/// The `u` (Unicode) flag is accepted but ignored — this engine is ASCII-only, so
-/// `(?-u)` is already its native behaviour and `(?u)` cannot upgrade it. The `m`
-/// (multiline) flag retargets `^`/`$` to `\n` line boundaries, modeled as the
+/// The `u` (Unicode) flag toggles Unicode-aware shorthands/word-boundaries; it
+/// defaults *off* so `#[token(regex = ...)]` stays ASCII (fast, no behaviour
+/// change), and callers opt in with `(?u)`. `\p{...}` property classes resolve to
+/// Unicode ranges regardless. The `m` (multiline) flag retargets `^`/`$` to `\n`
+/// line boundaries, modeled as the
 /// zero-width [`Atom::StartOfLine`]/[`Atom::EndOfLine`] assertions (the matcher
 /// loop evaluates them against the surrounding chars, like `\b`). The `R` (CRLF)
 /// flag is still *rejected* — it would need `\r\n` treated as a single line
@@ -30,6 +32,9 @@ struct Flags {
     /// `m` — multiline: `^`/`$` match at `\n` line boundaries (not just the input
     /// edges), lowered to [`Atom::StartOfLine`]/[`Atom::EndOfLine`].
     multiline: bool,
+    /// `u` — Unicode mode: `\d \w \s` and `\b`/`\B` use Unicode definitions rather
+    /// than ASCII. Defaults off (ASCII) so existing tokenizers are unchanged.
+    unicode: bool,
 }
 
 /// Applies one flag letter to `flags`, setting it when `negate` is false and
@@ -43,8 +48,7 @@ fn apply_flag(flags: &mut Flags, c: char, negate: bool) -> Option<()> {
         'x' => flags.ignore_whitespace = value,
         'U' => flags.swap_greedy = value,
         'm' => flags.multiline = value,
-        // `u` (Unicode) is a no-op: this engine is ASCII-only either way.
-        'u' => {}
+        'u' => flags.unicode = value,
         // `R` (CRLF) needs `\r\n` treated as one line terminator — not yet modeled.
         _ => return None,
     }
@@ -175,6 +179,31 @@ fn shorthand_class(c: char) -> Option<(bool, Vec<GroupEntry>)> {
     }
 }
 
+/// Reads the spec of a `\p`/`\P` Unicode property class (the iterator is positioned
+/// just after the `p`/`P`) and resolves it to a positive list of codepoint-range
+/// entries via [`crate::unicode::property_entries`]. The spec is either a single
+/// following letter (`\pL`) or a braced name (`\p{Greek}`, `\p{Letter}`,
+/// `\p{Script=Greek}`); `\P{...}` and `\p{^...}` select the complement. Returns
+/// `None` for a malformed or unknown property so the whole pattern is rejected.
+fn parse_property(sigil: char, iter: &mut impl Iterator<Item = char>) -> Option<Vec<GroupEntry>> {
+    let negated = sigil == 'P';
+    let body = match iter.next()? {
+        '{' => {
+            let mut body = String::new();
+            loop {
+                match iter.next()? {
+                    '}' => break,
+                    c => body.push(c),
+                }
+            }
+            body
+        }
+        // Shorthand single-letter form `\pL` / `\PL`.
+        c => c.to_string(),
+    };
+    crate::unicode::property_entries(&body, negated)
+}
+
 /// Parses the body of a `{...}` repetition spec (the text between the braces)
 /// into `(min, max)`, where `max == None` means unbounded (`{n,}`). Returns
 /// `None` for anything that is not a well-formed, in-bounds spec so the caller
@@ -290,6 +319,16 @@ fn parse_group(iter: &mut impl Iterator<Item = char>, flags: Flags) -> Option<At
                 // Resolve the effective member char, expanding shorthand classes inline.
                 let effective = if escaped {
                     escaped = false;
+                    if c == 'p' || c == 'P' {
+                        // A property class can't be a range bound; otherwise union its
+                        // (always-positive) ranges straight into the class.
+                        if in_range {
+                            return None;
+                        }
+                        group_entries.extend(parse_property(c, iter)?);
+                        first = false;
+                        continue;
+                    }
                     if let Some((inverted, entries)) = shorthand_class(c) {
                         // A negated shorthand can't be unioned into a positive class with
                         // the flat group model, and a shorthand can't be a range bound.
@@ -603,7 +642,16 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool, mut flags: Flags) 
             c => {
                 if escaped {
                     escaped = false;
-                    if let Some((inverted, entries)) = shorthand_class(c) {
+                    if c == 'p' || c == 'P' {
+                        atoms.push(AtomRepeat {
+                            // Property classes resolve to a positive range set (the
+                            // complement is materialised for `\P`), so the group is
+                            // never inverted.
+                            atom: Atom::Group(false, parse_property(c, iter)?),
+                            repeat: Repeat::Once,
+                            lazy: false,
+                        });
+                    } else if let Some((inverted, entries)) = shorthand_class(c) {
                         atoms.push(AtomRepeat {
                             atom: Atom::Group(inverted, entries),
                             repeat: Repeat::Once,
@@ -1158,10 +1206,44 @@ mod tests {
     }
 
     #[test]
-    fn unicode_flag_is_accepted_as_a_noop() {
-        // This engine is ASCII-only, so `u` toggles parse but change nothing.
+    fn unicode_flag_parses_and_leaves_literals_alone() {
+        // `(?u)`/`(?-u)` toggle Unicode mode (for `\d \w \s` / `\b`); plain literals
+        // are unaffected either way.
         assert_lit(&atoms("(?-u)ab")[0], "ab");
         assert_lit(&atoms("(?u)ab")[0], "ab");
+    }
+
+    #[test]
+    fn property_class_resolves_to_ranges() {
+        // `\p{Greek}` expands to real codepoint ranges; `\P{...}` is its complement.
+        let in_group = |atom: &AtomRepeat, c: char, want: bool| match &atom.atom {
+            Atom::Group(false, entries) => {
+                let hit = entries.iter().any(|e| match e {
+                    GroupEntry::Char(g) => *g == c,
+                    GroupEntry::Range(lo, hi) => *lo <= c && c <= *hi,
+                });
+                assert_eq!(hit, want, "{c:?} membership");
+            }
+            other => panic!("expected positive group, got {other:?}"),
+        };
+        in_group(&atoms(r"\p{Greek}")[0], 'λ', true);
+        in_group(&atoms(r"\p{Greek}")[0], 'a', false);
+        // Single-letter shorthand `\pL` (any letter).
+        in_group(&atoms(r"\pL")[0], 'a', true);
+        in_group(&atoms(r"\pL")[0], '5', false);
+        // `\P{L}` is the positive complement: digits in, letters out.
+        in_group(&atoms(r"\P{L}")[0], '5', true);
+        in_group(&atoms(r"\P{L}")[0], 'a', false);
+        // Inside a class, a property unions with the other members.
+        in_group(&atoms(r"[\p{Greek}0-9]")[0], 'λ', true);
+        in_group(&atoms(r"[\p{Greek}0-9]")[0], '7', true);
+        in_group(&atoms(r"[\p{Greek}0-9]")[0], 'a', false);
+    }
+
+    #[test]
+    fn unknown_property_is_rejected() {
+        assert!(SimpleRegexAst::parse(r"\p{NotAProperty}").is_none());
+        assert!(SimpleRegexAst::parse(r"[\p{Nope}]").is_none());
     }
 
     #[test]

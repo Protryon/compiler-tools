@@ -16,6 +16,7 @@ mod generate;
 mod matching;
 mod nfa;
 mod parse;
+mod unicode;
 
 /// Collect an iterator of token-producing values into one [`TokenStream`].
 ///
