@@ -17,6 +17,7 @@ fn atoms_could_capture_newline(atoms: &[AtomRepeat]) -> bool {
         }
         // Zero-width assertions consume nothing.
         Atom::EndOfInput
+        | Atom::StartOfText
         | Atom::WordBoundary {
             ..
         }
@@ -69,6 +70,44 @@ impl SimpleRegex {
         false
     }
 
+    /// Whether `state` accepts here, or can reach an accepting state purely through
+    /// zero-width assertion edges that hold at this position (`prev`/`c`). This is
+    /// what lets a greedy consuming thread back off to an assertion-gated accept it
+    /// would otherwise consume past: `.+\b` records the `\b` accept while `.+` keeps
+    /// eating, then backs off to it (and `\B(?:fo|foo)\B` accepts `fo` once the
+    /// longer `foo` fails its trailing `\B`). A zero-width move never advances the
+    /// position, so every state on such a path is evaluated at the same `prev`/`c`.
+    fn accepts_via_assertions(&self, start: u32, prev: Option<char>, c: Option<char>) -> bool {
+        use super::nfa::TransitionEvent;
+        if self.accepts(start) {
+            return true;
+        }
+        let is_zero_width = |t: &TransitionEvent| !matches!(t, TransitionEvent::Char(_) | TransitionEvent::Chars(..) | TransitionEvent::End);
+        // Fast path: a state with no zero-width edge can't reach an assertion-gated
+        // accept, so the overwhelmingly common no-assertion state allocates nothing.
+        let Some(transitions) = self.dfa.transitions.get(&start) else { return false };
+        if !transitions.iter().any(|(t, _)| is_zero_width(t)) {
+            return false;
+        }
+        let mut stack: Vec<u32> = vec![start];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(state) = stack.pop() {
+            if !seen.insert(state) {
+                continue;
+            }
+            if self.accepts(state) {
+                return true;
+            }
+            let Some(transitions) = self.dfa.transitions.get(&state) else { continue };
+            for (transition, target) in transitions {
+                if is_zero_width(transition) && zero_width_holds(transition, prev, c) {
+                    stack.push(*target);
+                }
+            }
+        }
+        false
+    }
+
     /// Whether `state` is accepting: the transition-less sink, or any state with an
     /// `End` edge to it.
     fn accepts(&self, state: u32) -> bool {
@@ -116,7 +155,7 @@ impl SimpleRegex {
         let zero_width_limit = self.dfa.transitions.len() + 1;
         let mut zero_width = 0usize;
         loop {
-            if self.accepts(state) {
+            if self.accepts_via_assertions(state, prev, c) {
                 last = Some(counter);
             }
             let Some(transitions) = self.dfa.transitions.get(&state) else { break };
@@ -167,6 +206,42 @@ fn is_word(ch: Option<char>, unicode: bool) -> bool {
     }
 }
 
+/// Whether a zero-width assertion edge holds at the current position, with `prev`
+/// the char before and `c` the lookahead char. Shared by `eval_state` (state
+/// progression) and `accepts_via_assertions` (recording an assertion-gated accept).
+/// Returns `false` for any non-zero-width event.
+#[allow(dead_code)]
+fn zero_width_holds(transition: &super::nfa::TransitionEvent, prev: Option<char>, c: Option<char>) -> bool {
+    use super::nfa::TransitionEvent;
+    match transition {
+        TransitionEvent::EndOfInput => c.is_none(),
+        // `^`/`\A` (non-multiline): only at the very start of the input.
+        TransitionEvent::StartOfText => prev.is_none(),
+        // `$` under `(?m)`: end of input or before a line terminator. In CRLF mode
+        // the terminators are `\r`, `\n` and the atomic `\r\n`, so `$` holds before
+        // a `\r` or a lone `\n` but not between the `\r` and `\n` of a pair.
+        TransitionEvent::EndOfLine {
+            crlf: false,
+        } => matches!(c, None | Some('\n')),
+        TransitionEvent::EndOfLine {
+            crlf: true,
+        } => matches!(c, None | Some('\r')) || (c == Some('\n') && prev != Some('\r')),
+        // `^` under `(?m)`: start of input or after a line terminator. The CRLF rule
+        // mirrors `$`: after a `\n` or a lone `\r`, but not between the `\r` and `\n`.
+        TransitionEvent::StartOfLine {
+            crlf: false,
+        } => matches!(prev, None | Some('\n')),
+        TransitionEvent::StartOfLine {
+            crlf: true,
+        } => matches!(prev, None | Some('\n')) || (prev == Some('\r') && c != Some('\n')),
+        TransitionEvent::WordBoundary {
+            negate,
+            unicode,
+        } => (is_word(prev, *unicode) != is_word(c, *unicode)) != *negate,
+        _ => false,
+    }
+}
+
 /// Evaluate one DFA state for the runtime interpreter, matching the priority the
 /// generated matcher uses: consuming edges (in declaration order) first, then the
 /// zero-width moves in stored order — `$`/`\z` at end of input, `$`/`^` under `(?m)`
@@ -198,32 +273,7 @@ fn eval_state(transitions: &[(super::nfa::TransitionEvent, u32)], prev: Option<c
     }
     // Zero-width assertions, only when no consuming edge claimed `c`, in stored order.
     for (transition, target) in transitions {
-        let holds = match transition {
-            TransitionEvent::EndOfInput => c.is_none(),
-            // `$` under `(?m)`: end of input or before a line terminator. In CRLF mode
-            // the terminators are `\r`, `\n` and the atomic `\r\n`, so `$` holds before
-            // a `\r` or a lone `\n` but not between the `\r` and `\n` of a pair.
-            TransitionEvent::EndOfLine {
-                crlf: false,
-            } => matches!(c, None | Some('\n')),
-            TransitionEvent::EndOfLine {
-                crlf: true,
-            } => matches!(c, None | Some('\r')) || (c == Some('\n') && prev != Some('\r')),
-            // `^` under `(?m)`: start of input or after a line terminator. The CRLF rule
-            // mirrors `$`: after a `\n` or a lone `\r`, but not between the `\r` and `\n`.
-            TransitionEvent::StartOfLine {
-                crlf: false,
-            } => matches!(prev, None | Some('\n')),
-            TransitionEvent::StartOfLine {
-                crlf: true,
-            } => matches!(prev, None | Some('\n')) || (prev == Some('\r') && c != Some('\n')),
-            TransitionEvent::WordBoundary {
-                negate,
-                unicode,
-            } => (is_word(prev, *unicode) != is_word(c, *unicode)) != *negate,
-            _ => false,
-        };
-        if holds {
+        if zero_width_holds(transition, prev, c) {
             return Step::MatchedEmpty(*target);
         }
     }
@@ -532,6 +582,43 @@ mod tests {
         assert_eq!(re.find_prefix("def", Some('x')), None);
         // `$` fires before a `\n` even when more input follows.
         assert_eq!(SimpleRegex::parse("(?m)[a-z]+$").unwrap().find_prefix("abc\nxyz", None), Some(("abc", "\nxyz")));
+    }
+
+    #[test]
+    fn start_of_text_anchor_only_holds_at_input_start() {
+        // `^`/`\A` (non-multiline) is a real start-of-text assertion: it holds only
+        // when there is no preceding char, so a mid-haystack slice (prev = Some) fails.
+        let re = SimpleRegex::parse("^abc").unwrap();
+        assert_eq!(re.find_prefix("abc", None), Some(("abc", "")));
+        assert_eq!(re.find_prefix("abc", Some('x')), None);
+        // `\A` is the same assertion and is valid anywhere (mid-pattern it can't hold).
+        assert_eq!(SimpleRegex::parse("\\Aabc").unwrap().find_prefix("abc", None), Some(("abc", "")));
+        assert_eq!(SimpleRegex::parse("a\\Ab").unwrap().find_prefix("ab", None), None);
+    }
+
+    #[test]
+    fn non_trailing_dollar_is_end_of_text() {
+        // A `$`/`\z` anywhere is an end-of-text assertion (not a literal): `$\b` only
+        // matches the empty string at the very end.
+        let re = SimpleRegex::parse("$\\b").unwrap();
+        assert_eq!(re.find_prefix("", Some('b')), Some(("", "")));
+        assert_eq!(re.find_prefix("ab", None), None);
+        // `a$b` can never match (end of text then more input).
+        assert_eq!(SimpleRegex::parse("a$b").unwrap().find_prefix("ab", None), None);
+    }
+
+    #[test]
+    fn word_boundary_backs_off_past_a_greedy_match() {
+        // `\b.+\b`: the greedy `.+` consumes past the inner `\b`, but the matcher
+        // records the `\b`-gated accept and backs off to it (regex-crate semantics).
+        let re = SimpleRegex::parse("\\b.+\\b").unwrap();
+        // Greedy `.+` runs to the end ("abc$$"), but the end (`$`→input edge, both
+        // non-word) is not a `\b`, so it backs off to the last boundary (after `c`).
+        assert_eq!(re.find_prefix("abc$$", Some('$')), Some(("abc", "$$")));
+        // `(?:fo|foo)\B`: `foo` fails its trailing `\B` at end of input, so the match
+        // backs off to `fo`, whose `\B` holds between the two `o`s.
+        let re = SimpleRegex::parse("(?:fo|foo)\\B").unwrap();
+        assert_eq!(re.find_prefix("foo", Some('x')), Some(("fo", "o")));
     }
 
     #[test]

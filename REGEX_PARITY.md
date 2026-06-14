@@ -26,9 +26,16 @@ where the corpus expects it.
   `\r\n` as a single terminator for `^`/`$`/`.` — *is* supported now.)
 - **Directional half-boundaries** — `\b{start}`, `\b{end}`, `\b{start-half}`,
   `\b{end-half}`. A separate assertion type from plain `\b`; not parsed.
-- **Word boundaries are non-backtracking** — a `\b` that would require
-  *un*-consuming a greedy match (e.g. `.*\bx`) won't match where the `regex`
-  crate would. `\bword\b`-style usage is fine. (Independent of ASCII vs Unicode.)
+- **A zero-width assertion that must expose a *further consuming* match in
+  parallel with a live greedy thread** — e.g. `.*\bx` on `"x"`, where `.*` could
+  consume the `x` *or* leave it for `\bx`. The single-thread DFA walk follows the
+  greedy consume and loses the assertion-gated continuation. This is the narrow
+  residue of "word-boundary non-backtracking": the common cases now work — a `\b`
+  that gates an *accept* behind a greedy run (`.+\b`, `\B(?:fo|foo)\B`) backs off
+  correctly (the matcher records the assertion-gated accept while the greedy thread
+  keeps going), and `^`/`$`/`\A`/`\z`/`\bword\b` are all honoured in a search.
+  Closing the remaining case needs a multi-thread (Pike-VM-style) step rather than
+  the single-state DFA walk. (Independent of ASCII vs Unicode.)
 
 ### Character classes
 - **POSIX classes** — `[[:alpha:]]`, etc.
@@ -61,11 +68,11 @@ generated matcher stay in lock-step):
 | | runtime interpreter | compiled-rust engine |
 |---|---|---|
 | total | 1184 | 1184 |
-| pass | 827 | 827 |
+| pass | 868 | 868 |
 | fail-to-parse | 0 | 0 |
-| fail-to-pass | 283 | 283 |
+| fail-to-pass | 242 | 242 |
 | skipped | 74 | 74 |
-| per search | ~3.3 µs | ~2.2 µs |
+| per search | ~7.5 µs | ~2.3 µs |
 
 Progression — the engine is already codepoint-based, so the class-side Unicode
 features are pure parse-time range expansions: `\p{…}` property classes 682 → 748,
@@ -74,13 +81,20 @@ negated-shorthand-in-class 752 → 759, and Unicode `\b`/`\B` word-ness (the one
 matcher-side change — a shared word-range table in both engines) 759 → 767. CRLF
 mode `(?R)` — line anchors and `.` treat `\r`/`\n`/`\r\n` as one terminator set —
 cleared the last fail-to-parse cases (the corpus runs many tests with the `R`
-flag, which the parser used to reject outright) and lifted 767 → 827.
+flag, which the parser used to reject outright) and lifted 767 → 827. Start-/
+end-of-text anchors — modelling `^`/`\A` as a real `prev`-is-`None` assertion
+(instead of dropping a leading `^`) and `$`/`\z` as an end-of-text assertion
+anywhere (not just trailing), so a search honours them at every position — lifted
+827 → 865. Assertion-gated greedy backoff — recording an accept reachable through
+zero-width assertions that hold at the current position, so `.+\b`/`\B…\B` back
+off to it — 865 → 868.
 
 The remaining failures cluster into the gaps above:
 
 | bucket | ~tests | notes |
 |---|---|---|
 | Directional half-boundaries (`\b{start}`/`\b{end}`/…) | ~70 | a distinct assertion type the parser doesn't yet recognise (both ASCII and Unicode variants) |
-| Word-boundary non-backtracking + zero-width empty matches | ~15 | a `\b` requiring an un-consumed greedy match (`.*\bx`) or an empty match at a string/word edge; independent of Unicode |
+| Assertion in parallel with a live greedy thread | ~2 | a `\b` that must expose a *further consuming* match the greedy thread could also take (`.*\bx`), or a zero-width branch that must out-prioritise a consuming one (`(?:\b|%)+`); needs a multi-thread step. (The accept-backoff and `^`/`$`/`\A`/`\z` cases are now handled.) |
+| Bytes-mode word boundaries at non-char-boundaries | ~1 | `\B` matches inside a multi-byte char in a `utf8=false` haystack; unrepresentable in this `&str`-based engine |
 | Custom (non-`\n`/CRLF) line terminators | small | the `regex` crate's arbitrary-terminator option; the `\n` and `(?R)` CRLF sets are modeled |
 | POSIX classes, octal escapes | small | self-contained changes to `parse.rs` |

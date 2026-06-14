@@ -10,6 +10,9 @@ pub enum TransitionEvent {
     Chars(bool, Vec<GroupEntry>),
     /// Zero-width `$` / `\z` assertion: only taken when the input is exhausted.
     EndOfInput,
+    /// Zero-width `^` / `\A` (non-multiline start-of-text) assertion: only taken at
+    /// the very start of the input (the previous char is `None`).
+    StartOfText,
     /// Zero-width word-boundary assertion (`\b` / `\B`); `negate` flips it and
     /// `unicode` selects Unicode `\w` word-ness over ASCII.
     WordBoundary {
@@ -55,6 +58,7 @@ impl TransitionEvent {
             }
             // A zero-width assertion never consumes a character.
             TransitionEvent::EndOfInput
+            | TransitionEvent::StartOfText
             | TransitionEvent::WordBoundary {
                 ..
             }
@@ -183,6 +187,11 @@ impl Builder {
             Atom::EndOfInput => {
                 let end = self.new_state();
                 self.edge(start, TransitionEvent::EndOfInput, end);
+                end
+            }
+            Atom::StartOfText => {
+                let end = self.new_state();
+                self.edge(start, TransitionEvent::StartOfText, end);
                 end
             }
             Atom::WordBoundary {

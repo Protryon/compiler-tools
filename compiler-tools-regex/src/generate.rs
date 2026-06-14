@@ -52,6 +52,11 @@ impl SimpleRegex {
                         needs_prev |= *crlf;
                     }
                     nfa::TransitionEvent::EndOfInput => has_zero_width = true,
+                    // `^`/`\A` checks `prev`, so it needs the previous char tracked.
+                    nfa::TransitionEvent::StartOfText => {
+                        needs_prev = true;
+                        has_zero_width = true;
+                    }
                     _ => {}
                 }
             }
@@ -131,6 +136,7 @@ impl SimpleRegex {
                         ..
                     }
                     | nfa::TransitionEvent::EndOfInput
+                    | nfa::TransitionEvent::StartOfText
                     | nfa::TransitionEvent::EndOfLine {
                         ..
                     }
@@ -200,10 +206,28 @@ impl SimpleRegex {
 
             // Fold the accept into the arm: an accepting state records the position the
             // moment it is (re-)entered, replacing the old per-iteration `is_accepting`.
+            // A non-accepting state still records the position if it can reach an accept
+            // purely through zero-width assertion edges that hold here (`.+\b`: remember
+            // the `\b`-gated accept while the greedy `.+` consumes past it, then back off
+            // to it). The conditions use the lookahead `c` (the accept check runs before
+            // the `match c` below); a zero-width hop never moves, so every edge on a path
+            // is evaluated at the same `prev`/`c`.
             let accept = if is_accepting {
                 quote! { last = counter; }
             } else {
-                quote! {}
+                let conds = self.zero_width_accept_conditions(*state);
+                if conds.is_empty() {
+                    quote! {}
+                } else {
+                    let cond = flatten(conds.into_iter().enumerate().map(|(i, c)| {
+                        if i == 0 {
+                            quote! { (#c) }
+                        } else {
+                            quote! { || (#c) }
+                        }
+                    }));
+                    quote! { if #cond { last = counter; } }
+                }
             };
 
             // The zero-width moves are evaluated only when no consuming edge claimed the
@@ -220,48 +244,8 @@ impl SimpleRegex {
             } else {
                 let mut chain = quote! { break };
                 for (event, target) in zero_width.iter().rev() {
-                    let cond = match event {
-                        nfa::TransitionEvent::EndOfInput => quote! { other.is_none() },
-                        // `$` under `(?m)`: end of input or before a line terminator. CRLF
-                        // mode widens the terminator set to `\r`/`\n`/`\r\n`, holding before
-                        // a `\r` or a lone `\n` but not between the `\r` and `\n` of a pair.
-                        nfa::TransitionEvent::EndOfLine {
-                            crlf: false,
-                        } => quote! { matches!(other, None | Some('\n')) },
-                        nfa::TransitionEvent::EndOfLine {
-                            crlf: true,
-                        } => {
-                            quote! { matches!(other, None | Some('\r')) || (other == Some('\n') && prev != Some('\r')) }
-                        }
-                        // `^` under `(?m)`: start of input or after a line terminator; the
-                        // CRLF rule mirrors `$` (after `\n` or a lone `\r`, not inside `\r\n`).
-                        nfa::TransitionEvent::StartOfLine {
-                            crlf: false,
-                        } => quote! { matches!(prev, None | Some('\n')) },
-                        nfa::TransitionEvent::StartOfLine {
-                            crlf: true,
-                        } => {
-                            quote! { matches!(prev, None | Some('\n')) || (prev == Some('\r') && other != Some('\n')) }
-                        }
-                        nfa::TransitionEvent::WordBoundary {
-                            negate,
-                            unicode,
-                        } => {
-                            // Word-ness via the once-emitted helper for this boundary's mode.
-                            let is_word = if *unicode {
-                                quote! { is_word_unicode }
-                            } else {
-                                quote! { is_word_ascii }
-                            };
-                            let cmp = if *negate {
-                                quote! { == }
-                            } else {
-                                quote! { != }
-                            };
-                            quote! { #is_word(prev) #cmp #is_word(other) }
-                        }
-                        _ => unreachable!(),
-                    };
+                    // Evaluated against the lookahead `other` (the `match c` arm binding).
+                    let cond = zw_cond(event, &quote! { other });
                     chain = quote! {
                         if #cond {
                             state = #target;
@@ -357,6 +341,107 @@ impl SimpleRegex {
                     Some((&from[..last], &from[last..]))
                 }
             }
+        }
+    }
+
+    /// Whether `state` is accepting: the transition-less sink, or any state carrying
+    /// an `End` edge. Mirrors `matching::SimpleRegex::accepts`.
+    fn state_accepts(&self, state: u32) -> bool {
+        state == self.dfa.final_state
+            || self
+                .dfa
+                .transitions
+                .get(&state)
+                .is_some_and(|transitions| transitions.iter().any(|(t, _)| matches!(t, nfa::TransitionEvent::End)))
+    }
+
+    /// One condition per simple path of zero-width assertion edges from `state` to an
+    /// accepting state — the `&&` of the edges' conditions (lookahead `c`); the caller
+    /// `||`s them. This is the build-time counterpart of the interpreter's
+    /// `accepts_via_assertions`: it lets a non-accepting state record an accept that is
+    /// only reachable through assertions holding at the current position. `state` itself
+    /// accepting is handled separately (unconditional accept), so paths start one hop in.
+    fn zero_width_accept_conditions(&self, state: u32) -> Vec<TokenStream> {
+        let mut out = vec![];
+        let mut on_path = std::collections::HashSet::new();
+        self.zero_width_accept_dfs(state, &mut vec![], &mut on_path, &mut out);
+        out
+    }
+
+    fn zero_width_accept_dfs(&self, state: u32, acc: &mut Vec<TokenStream>, on_path: &mut std::collections::HashSet<u32>, out: &mut Vec<TokenStream>) {
+        // A repeated state means a zero-width cycle; it can never reach a *new* accept,
+        // so stop (any reachable accept is found via the simple sub-path).
+        if !on_path.insert(state) {
+            return;
+        }
+        if let Some(transitions) = self.dfa.transitions.get(&state) {
+            for (transition, target) in transitions {
+                if matches!(transition, nfa::TransitionEvent::Char(_) | nfa::TransitionEvent::Chars(..) | nfa::TransitionEvent::End) {
+                    continue;
+                }
+                acc.push(zw_cond(transition, &quote! { c }));
+                if self.state_accepts(*target) {
+                    out.push(flatten(acc.iter().enumerate().map(|(i, c)| {
+                        if i == 0 {
+                            quote! { #c }
+                        } else {
+                            quote! { && #c }
+                        }
+                    })));
+                }
+                self.zero_width_accept_dfs(*target, acc, on_path, out);
+                acc.pop();
+            }
+        }
+        on_path.remove(&state);
+    }
+}
+
+/// The boolean condition under which a zero-width assertion edge holds, evaluated
+/// against `prev` and the given lookahead token (`c` at the top of a state arm, the
+/// `other` binding in the consuming-`match`'s fallback). Compound conditions are
+/// parenthesised so they compose under `&&`/`||`.
+fn zw_cond(event: &nfa::TransitionEvent, look: &TokenStream) -> TokenStream {
+    match event {
+        nfa::TransitionEvent::EndOfInput => quote! { #look.is_none() },
+        // `^`/`\A` (non-multiline): only at the very start of the input.
+        nfa::TransitionEvent::StartOfText => quote! { prev.is_none() },
+        // `$` under `(?m)`: end of input or before a line terminator. CRLF mode widens
+        // the terminator set to `\r`/`\n`/`\r\n`, holding before a `\r` or a lone `\n`
+        // but not between the `\r` and `\n` of a pair.
+        nfa::TransitionEvent::EndOfLine {
+            crlf: false,
+        } => quote! { matches!(#look, None | Some('\n')) },
+        nfa::TransitionEvent::EndOfLine {
+            crlf: true,
+        } => quote! { (matches!(#look, None | Some('\r')) || (#look == Some('\n') && prev != Some('\r'))) },
+        // `^` under `(?m)`: start of input or after a line terminator; the CRLF rule
+        // mirrors `$` (after `\n` or a lone `\r`, not inside `\r\n`).
+        nfa::TransitionEvent::StartOfLine {
+            crlf: false,
+        } => quote! { matches!(prev, None | Some('\n')) },
+        nfa::TransitionEvent::StartOfLine {
+            crlf: true,
+        } => quote! { (matches!(prev, None | Some('\n')) || (prev == Some('\r') && #look != Some('\n'))) },
+        nfa::TransitionEvent::WordBoundary {
+            negate,
+            unicode,
+        } => {
+            // Word-ness via the once-emitted helper for this boundary's mode.
+            let is_word = if *unicode {
+                quote! { is_word_unicode }
+            } else {
+                quote! { is_word_ascii }
+            };
+            let cmp = if *negate {
+                quote! { == }
+            } else {
+                quote! { != }
+            };
+            quote! { (#is_word(prev) #cmp #is_word(#look)) }
+        }
+        nfa::TransitionEvent::Epsilon | nfa::TransitionEvent::Char(_) | nfa::TransitionEvent::Chars(..) | nfa::TransitionEvent::End => {
+            unreachable!("not a zero-width assertion")
         }
     }
 }

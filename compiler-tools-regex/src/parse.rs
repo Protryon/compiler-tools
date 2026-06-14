@@ -258,6 +258,7 @@ fn extract_bindable(atoms: &mut Vec<AtomRepeat>) -> Option<Atom> {
         }
         Atom::Group(..) | Atom::Alternation(..) => Some(atoms.pop().unwrap().atom),
         Atom::EndOfInput
+        | Atom::StartOfText
         | Atom::WordBoundary {
             ..
         }
@@ -661,10 +662,17 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool, mut flags: Flags) 
                 repeat: Repeat::Once,
                 lazy: false,
             }),
-            '^' if !escaped && atoms.is_empty() => {
-                // Leading start-of-input anchor: a no-op for a prefix matcher.
-            }
-            '$' if !escaped && iter.clone().next().is_none() => atoms.push(AtomRepeat {
+            // Outside `(?m)`, `^`/`$` are the start-/end-of-text anchors (`\A`/`\z`):
+            // zero-width assertions the matcher checks against the surrounding chars.
+            // They are real assertions (not dropped/literal) so a mid-haystack search
+            // respects them; the generated tokenizer always starts a token at the input
+            // edge (`prev`/lookahead `None`), where they hold like a no-op.
+            '^' if !escaped => atoms.push(AtomRepeat {
+                atom: Atom::StartOfText,
+                repeat: Repeat::Once,
+                lazy: false,
+            }),
+            '$' if !escaped => atoms.push(AtomRepeat {
                 atom: Atom::EndOfInput,
                 repeat: Repeat::Once,
                 lazy: false,
@@ -718,17 +726,19 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool, mut flags: Flags) 
                         });
                     } else {
                         match c {
-                            // `\A` (start-of-text) is a no-op at the start of a prefix
-                            // match; anywhere else it can never hold, so reject the pattern.
-                            'A' if atoms.is_empty() => {}
-                            'A' => return None,
-                            // `\z` (end-of-text) is exactly a trailing `$` for this engine.
-                            'z' if iter.clone().next().is_none() => atoms.push(AtomRepeat {
+                            // `\A` (start-of-text) / `\z` (end-of-text) are the explicit,
+                            // never-multiline forms of `^`/`$`: zero-width assertions on the
+                            // input edges, valid anywhere in the pattern.
+                            'A' => atoms.push(AtomRepeat {
+                                atom: Atom::StartOfText,
+                                repeat: Repeat::Once,
+                                lazy: false,
+                            }),
+                            'z' => atoms.push(AtomRepeat {
                                 atom: Atom::EndOfInput,
                                 repeat: Repeat::Once,
                                 lazy: false,
                             }),
-                            'z' => return None,
                             'b' => atoms.push(AtomRepeat {
                                 atom: Atom::WordBoundary {
                                     negate: false,
@@ -1045,13 +1055,16 @@ mod tests {
     }
 
     #[test]
-    fn leading_caret_is_dropped() {
-        // A leading `^` is a no-op anchor for this prefix matcher.
+    fn caret_is_start_of_text_anchor() {
+        // `^` (non-multiline) is a zero-width start-of-text assertion, leading or not.
         let a = atoms("^ab");
-        assert_eq!(a.len(), 1);
-        assert_lit(&a[0], "ab");
-        // A non-leading caret is an ordinary literal.
-        assert_lit(&atoms("a^b")[0], "a^b");
+        assert!(matches!(a[0].atom, Atom::StartOfText));
+        assert_lit(&a[1], "ab");
+        // An unescaped `^` is always an anchor, never a literal char.
+        let mid = atoms("a^b");
+        assert_lit(&mid[0], "a");
+        assert!(matches!(mid[1].atom, Atom::StartOfText));
+        assert_lit(&mid[2], "b");
     }
 
     #[test]
@@ -1098,18 +1111,22 @@ mod tests {
                 crlf: true
             }
         ));
-        // Without `(?m)`, behaviour is unchanged: leading `^` dropped, trailing `$`
-        // is end-of-input, and a mid-pattern anchor stays literal.
-        assert!(matches!(atoms("^a$").last().unwrap().atom, Atom::EndOfInput));
-        assert_lit(&atoms("a^b")[0], "a^b");
+        // Without `(?m)`, `^`/`$` are the start-/end-of-text anchors anywhere.
+        let plain = atoms("^a$");
+        assert!(matches!(plain.first().unwrap().atom, Atom::StartOfText));
+        assert!(matches!(plain.last().unwrap().atom, Atom::EndOfInput));
+        assert!(matches!(atoms("a^b")[1].atom, Atom::StartOfText));
     }
 
     #[test]
-    fn trailing_dollar_is_end_anchor() {
+    fn dollar_is_end_of_text_anchor() {
         let a = atoms("ab$");
         assert!(matches!(a.last().unwrap().atom, Atom::EndOfInput));
-        // A non-trailing `$` is an ordinary literal.
-        assert_lit(&atoms("a$b")[0], "a$b");
+        // An unescaped `$` is an end-of-text anchor anywhere, not a literal char.
+        let mid = atoms("a$b");
+        assert_lit(&mid[0], "a");
+        assert!(matches!(mid[1].atom, Atom::EndOfInput));
+        assert_lit(&mid[2], "b");
     }
 
     #[test]
@@ -1141,20 +1158,21 @@ mod tests {
 
     #[test]
     fn start_text_anchor_matches_caret() {
-        // \A at the start is a no-op anchor and is dropped.
+        // `\A` is the start-of-text assertion (same as a non-multiline `^`), and is
+        // valid anywhere in the pattern (mid-pattern it simply can never hold).
         let a = atoms("\\Aab");
-        assert_eq!(a.len(), 1);
-        assert_lit(&a[0], "ab");
-        // \A anywhere else can never hold, so the pattern is rejected.
-        assert!(SimpleRegexAst::parse("a\\Ab").is_none());
+        assert!(matches!(a[0].atom, Atom::StartOfText));
+        assert_lit(&a[1], "ab");
+        let mid = atoms("a\\Ab");
+        assert!(matches!(mid[1].atom, Atom::StartOfText));
     }
 
     #[test]
     fn end_text_anchor_matches_dollar() {
-        // \z at the end lowers to the same end-of-input assertion as `$`.
+        // `\z` lowers to the same end-of-input assertion as `$`, valid anywhere.
         let a = atoms("ab\\z");
         assert!(matches!(a.last().unwrap().atom, Atom::EndOfInput));
-        assert!(SimpleRegexAst::parse("a\\zb").is_none());
+        assert!(matches!(atoms("a\\zb")[1].atom, Atom::EndOfInput));
     }
 
     #[test]

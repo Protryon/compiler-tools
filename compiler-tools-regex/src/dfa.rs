@@ -268,6 +268,7 @@ impl Dfa {
             // Gather the non-epsilon edges leaving the closure, in priority order.
             let mut consuming: Vec<(Ranges, u32)> = vec![];
             let mut end_of_input: Closure = vec![];
+            let mut start_of_text: Closure = vec![];
             // Line anchors keyed by `crlf as usize` so the `\n`-only and CRLF variants
             // (a pattern can mix them with scoped `(?R)`) stay distinct edges.
             let mut end_of_line: [Closure; 2] = [vec![], vec![]];
@@ -287,6 +288,7 @@ impl Dfa {
                         TransitionEvent::Epsilon => {}
                         TransitionEvent::Char(_) | TransitionEvent::Chars(..) => consuming.push((event_ranges(event), *target)),
                         TransitionEvent::EndOfInput => push_unique(&mut end_of_input, *target),
+                        TransitionEvent::StartOfText => push_unique(&mut start_of_text, *target),
                         TransitionEvent::EndOfLine {
                             crlf,
                         } => push_unique(&mut end_of_line[*crlf as usize], *target),
@@ -322,6 +324,10 @@ impl Dfa {
             if !end_of_input.is_empty() {
                 let target_id = wire(end_of_input, &mut interner, &mut worklist);
                 out.push((TransitionEvent::EndOfInput, target_id));
+            }
+            if !start_of_text.is_empty() {
+                let target_id = wire(start_of_text, &mut interner, &mut worklist);
+                out.push((TransitionEvent::StartOfText, target_id));
             }
             for crlf in [false, true] {
                 let targets = std::mem::take(&mut end_of_line[crlf as usize]);

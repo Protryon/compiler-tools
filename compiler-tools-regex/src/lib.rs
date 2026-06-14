@@ -49,10 +49,14 @@ pub enum Atom {
     // (inverted, items)
     Group(bool, Vec<GroupEntry>),
     /// A zero-width `$` / `\z` assertion: the match only completes when the input
-    /// is exhausted. There is no start-of-input counterpart because this engine
-    /// always matches a prefix from the current position, so a leading `^` / `\A`
-    /// is a no-op and is dropped at parse time.
+    /// is exhausted (the lookahead char is `None`).
     EndOfInput,
+    /// A zero-width `^` / `\A` (non-multiline start-of-text) assertion: holds only at
+    /// the very start of the input, i.e. when the preceding char (`prev`) is `None`.
+    /// The generated tokenizer always begins a token with `prev = None`, so a leading
+    /// `^`/`\A` always holds there (a no-op); it matters for a mid-haystack search,
+    /// where the slice can begin after other text.
+    StartOfText,
     /// A zero-width word-boundary assertion (`\b` when `negate` is `false`, `\B` when
     /// `true`). Holds when the word-ness of the previous and next characters differ
     /// (`\b`) or match (`\B`); the edges of the input count as non-word. Consumes
