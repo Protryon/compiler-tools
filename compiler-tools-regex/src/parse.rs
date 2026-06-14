@@ -367,11 +367,19 @@ fn parse_group(iter: &mut impl Iterator<Item = char>, flags: Flags) -> Option<At
     }
 
     if flags.case_insensitive {
-        let mut folded = Vec::with_capacity(group_entries.len());
-        for entry in group_entries {
-            fold_entry(entry, &mut folded);
-        }
-        group_entries = folded;
+        // Under Unicode mode, fold with the full simple case-folding tables; otherwise
+        // keep the ASCII fold (so a non-Unicode tokenizer's `[a-z]` doesn't suddenly
+        // match the Kelvin sign). Folding the *members* before any `[^...]` negation is
+        // what makes `(?i)[^a]` exclude both cases.
+        group_entries = if flags.unicode {
+            crate::unicode::case_fold(&group_entries)
+        } else {
+            let mut folded = Vec::with_capacity(group_entries.len());
+            for entry in group_entries {
+                fold_entry(entry, &mut folded);
+            }
+            folded
+        };
     }
 
     Some(Atom::Group(inverted, group_entries))
@@ -396,19 +404,32 @@ fn push_lit(atoms: &mut Vec<AtomRepeat>, c: char) {
     }
 }
 
-/// Appends a content character, honouring `(?i)`: a cased ASCII letter becomes a
-/// two-member group matching both cases (which can't coalesce into a literal run),
-/// any other char falls through to [`push_lit`].
+/// Appends a content character, honouring `(?i)`: a cased letter with more than one
+/// case becomes a group matching its whole case-fold orbit (which can't coalesce
+/// into a literal run); any other char falls through to [`push_lit`]. Under Unicode
+/// mode the orbit comes from the full simple case-folding tables (so `(?i)k` also
+/// matches the Kelvin sign), otherwise it is the ASCII upper/lower pair.
 fn push_char(atoms: &mut Vec<AtomRepeat>, c: char, flags: Flags) {
-    if flags.case_insensitive && c.is_ascii_alphabetic() {
-        atoms.push(AtomRepeat {
-            atom: Atom::Group(false, vec![GroupEntry::Char(c.to_ascii_lowercase()), GroupEntry::Char(c.to_ascii_uppercase())]),
-            repeat: Repeat::Once,
-            lazy: false,
-        });
-    } else {
-        push_lit(atoms, c);
+    if flags.case_insensitive {
+        let entries = if flags.unicode {
+            crate::unicode::case_fold(&[GroupEntry::Char(c)])
+        } else if c.is_ascii_alphabetic() {
+            vec![GroupEntry::Char(c.to_ascii_lowercase()), GroupEntry::Char(c.to_ascii_uppercase())]
+        } else {
+            vec![GroupEntry::Char(c)]
+        };
+        // Only a real fold (more than the char itself) needs a group; otherwise the
+        // char stays a coalescible literal.
+        if entries.len() > 1 {
+            atoms.push(AtomRepeat {
+                atom: Atom::Group(false, entries),
+                repeat: Repeat::Once,
+                lazy: false,
+            });
+            return;
+        }
     }
+    push_lit(atoms, c);
 }
 
 /// What a `(...)` prefix turned out to be once its leading `(?...)` modifier (if
@@ -643,11 +664,15 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool, mut flags: Flags) 
                 if escaped {
                     escaped = false;
                     if c == 'p' || c == 'P' {
+                        let mut entries = parse_property(c, iter)?;
+                        if flags.case_insensitive && flags.unicode {
+                            entries = crate::unicode::case_fold(&entries);
+                        }
                         atoms.push(AtomRepeat {
                             // Property classes resolve to a positive range set (the
                             // complement is materialised for `\P`), so the group is
                             // never inverted.
-                            atom: Atom::Group(false, parse_property(c, iter)?),
+                            atom: Atom::Group(false, entries),
                             repeat: Repeat::Once,
                             lazy: false,
                         });

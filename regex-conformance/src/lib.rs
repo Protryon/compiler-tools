@@ -36,16 +36,26 @@ pub use compiled::compiled_lookup;
 pub type BoxedMatcher = Box<dyn Fn(&str, Option<char>) -> Option<(&str, &str)>>;
 
 /// The pattern string to feed the engine for `test`, with the corpus' test-level
-/// options folded into inline flags so they behave like the `regex` crate's
-/// builder switches. Currently this maps `case-insensitive = true` to a leading
-/// `(?i)` (the same global effect as `RegexBuilder::case_insensitive(true)`).
+/// options folded into a leading inline-flag group so they behave like the `regex`
+/// crate's builder switches. Maps `unicode = true` (the corpus default) to `u` and
+/// `case-insensitive = true` to `i` — the same global effect as
+/// `RegexBuilder::unicode(true)` / `.case_insensitive(true)`. The engine itself
+/// defaults to ASCII, so the explicit `(?u)` is what turns on Unicode case folding
+/// (and, as they land, the Unicode shorthands/word-boundary) for the corpus.
 ///
 /// `build.rs` keeps a byte-for-byte copy of this (a build script can't depend on
 /// its own crate), so the compiled-engine matcher and the runtime interpreter
 /// parse the *same* effective pattern — keep the two in sync.
 pub fn effective_pattern(test: &RegexTest) -> String {
     let pattern = &test.regexes()[0];
-    if test.case_insensitive() { format!("(?i){pattern}") } else { pattern.clone() }
+    let mut inline = String::new();
+    if test.unicode() {
+        inline.push('u');
+    }
+    if test.case_insensitive() {
+        inline.push('i');
+    }
+    if inline.is_empty() { pattern.clone() } else { format!("(?{inline}){pattern}") }
 }
 
 /// The directory holding the TOML test corpus (`<workspace>/testdata`).

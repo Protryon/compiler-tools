@@ -17,13 +17,20 @@ use quote::{format_ident, quote};
 use regex_test::{RegexTest, RegexTests};
 
 /// Byte-for-byte copy of `regex_conformance::effective_pattern` (a build script
-/// can't depend on its own crate). Folds the corpus' test-level options into
-/// inline flags — currently `case-insensitive = true` → a leading `(?i)` — so the
-/// compiled matcher and the runtime interpreter parse the same pattern. Keep in
-/// sync with `src/lib.rs`.
+/// can't depend on its own crate). Folds the corpus' test-level options into a
+/// leading inline-flag group — `unicode = true` → `u`, `case-insensitive = true` →
+/// `i` — so the compiled matcher and the runtime interpreter parse the same
+/// pattern. Keep in sync with `src/lib.rs`.
 fn effective_pattern(test: &RegexTest) -> String {
     let pattern = &test.regexes()[0];
-    if test.case_insensitive() { format!("(?i){pattern}") } else { pattern.clone() }
+    let mut inline = String::new();
+    if test.unicode() {
+        inline.push('u');
+    }
+    if test.case_insensitive() {
+        inline.push('i');
+    }
+    if inline.is_empty() { pattern.clone() } else { format!("(?{inline}){pattern}") }
 }
 
 fn main() {

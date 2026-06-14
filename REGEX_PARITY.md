@@ -23,13 +23,13 @@ crate at runtime.
   flat `Group(bool, Vec<GroupEntry>)` can't represent the union of a positive set
   and a negated subset.
 - **POSIX classes** — `[[:alpha:]]`, etc.
-- **Unicode shorthands & semantics** — `\p{...}`/`\P{...}` property classes *are*
-  supported now (resolved to codepoint ranges at build time via `regex-syntax`; see
-  `unicode.rs`). Still ASCII-only: the shorthands `\d \w \s`, `\b` word-ness, and
-  `(?i)` case-folding. `(?u)` toggles a `unicode` flag but doesn't yet retarget the
-  shorthands/word-boundary to Unicode definitions, and Unicode case folding is not
-  reproduced. The engine defaults to ASCII (fast tokenizers); the conformance
-  harness opts into Unicode where the corpus expects it.
+- **Unicode shorthands & semantics** — `\p{...}`/`\P{...}` property classes and
+  `(?iu)` simple case folding *are* supported now (resolved to codepoint ranges at
+  build time via `regex-syntax`; see `unicode.rs`). Still ASCII-only: the shorthands
+  `\d \w \s` and `\b` word-ness. `(?u)` toggles a `unicode` flag (which already
+  drives case folding) but doesn't yet retarget the shorthands/word-boundary to
+  Unicode definitions. The engine defaults to ASCII (fast tokenizers); the
+  conformance harness opts into Unicode where the corpus expects it (`(?u)`).
 
 ### Escapes
 - **Octal escapes** — `\123`, `\o{...}`. (Hex/codepoint escapes *are* supported.)
@@ -59,20 +59,21 @@ generated matcher stay in lock-step):
 | | runtime interpreter | compiled-rust engine |
 |---|---|---|
 | total | 1184 | 1184 |
-| pass | 748 | 748 |
+| pass | 752 | 752 |
 | fail-to-parse | 109 | 109 |
-| fail-to-pass | 253 | 253 |
+| fail-to-pass | 249 | 249 |
 | skipped | 74 | 74 |
-| per search | ~3.3 µs | ~2.2 µs |
+| per search | ~3.1 µs | ~1.9 µs |
 
-`\p{…}` property-class support took pass 682 → 748 (the engine is already
-codepoint-based, so the classes just expand into the existing range model).
+`\p{…}` property classes took pass 682 → 748, and `(?iu)` Unicode simple case
+folding 748 → 752 — both pure parse-time range expansions, since the engine is
+already codepoint-based.
 
 The remaining failures cluster into the gaps above:
 
 | bucket | ~tests | notes |
 |---|---|---|
-| Unicode `\w`/`\b`/`\s` + Unicode case folding | ~120–170 | dominates fail-to-pass; the shorthands/word-boundary need their Unicode range sets (same `regex-syntax` tables as `\p{…}`), and `(?i)` needs Unicode simple case folding |
+| Unicode `\w`/`\b`/`\s` | ~120–160 | dominates fail-to-pass; the shorthands/word-boundary need their Unicode range sets (same `regex-syntax` tables as `\p{…}`) |
 | ASCII word-boundary correctness | ~30–60 | a subset is pure-ASCII and fixable without Unicode (zero-width `\b` empty matches, `.*\bx` non-backtracking) |
 | CRLF / `(?R)` + custom line terminators | ~40 | reuses the `prev`/lookahead machinery but must treat `\r\n` as one terminator |
 | Negated shorthands in classes, POSIX classes | small | self-contained changes to `parse.rs`'s group model |

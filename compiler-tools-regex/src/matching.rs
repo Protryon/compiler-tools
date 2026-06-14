@@ -511,6 +511,24 @@ mod tests {
     }
 
     #[test]
+    fn unicode_case_folding_under_iu() {
+        // Plain `(?i)` is ASCII-only: a non-ASCII letter is not folded.
+        let ascii = SimpleRegex::parse("(?i)Σ").unwrap();
+        assert_eq!(ascii.find_prefix("σ", None), None);
+        // `(?iu)` folds with the full Unicode tables: Σ matches σ and final-sigma ς.
+        let uni = SimpleRegex::parse("(?iu)Σ").unwrap();
+        assert_eq!(uni.find_prefix("σ", None), Some(("σ", "")));
+        assert_eq!(uni.find_prefix("ς", None), Some(("ς", "")));
+        // The Kelvin sign (U+212A) simple-folds to `k`, which ASCII folding misses.
+        let kelvin = SimpleRegex::parse("(?iu)k").unwrap();
+        assert_eq!(kelvin.find_prefix("\u{212A}", None), Some(("\u{212A}", "")));
+        assert_eq!(SimpleRegex::parse("(?i)k").unwrap().find_prefix("\u{212A}", None), None);
+        // A class folds with Unicode equivalents too.
+        let class = SimpleRegex::parse("(?iu)[α-ω]").unwrap();
+        assert_eq!(class.find_prefix("Λ", None), Some(("Λ", "")));
+    }
+
+    #[test]
     fn dotall_flag_matches_newline() {
         let re = SimpleRegex::parse("(?s)a.b").unwrap();
         assert_eq!(re.find_prefix("a\nb", None), Some(("a\nb", "")));
