@@ -144,38 +144,48 @@ fn parse_hex_escape(kind: char, iter: &mut impl Iterator<Item = char>) -> Option
     char::from_u32(u32::from_str_radix(&hex, 16).ok()?)
 }
 
-/// Expands a Perl-style shorthand class escape into `(inverted, entries)`. ASCII
-/// semantics are used (matching the `regex` crate's `(?-u)` byte mode); use
-/// `regex_full` for Unicode-aware classes. Returns `None` for a non-shorthand
-/// escape so the caller can treat it as a literal character.
-fn shorthand_class(c: char) -> Option<(bool, Vec<GroupEntry>)> {
-    let digit = || vec![GroupEntry::Range('0', '9')];
-    let word = || {
-        vec![
+/// Expands a Perl-style shorthand class escape into `(inverted, base_entries)`,
+/// where `base_entries` is the *positive* set (`\d \w \s`) and `inverted` flags the
+/// `\D \W \S` forms. Under `unicode`, the base set is the full Unicode range set
+/// (resolved by `regex-syntax`); otherwise the historical ASCII set (matching the
+/// `regex` crate's `(?-u)` byte mode). Returns `None` for a non-shorthand escape so
+/// the caller can treat it as a literal character.
+fn shorthand_class(c: char, unicode: bool) -> Option<(bool, Vec<GroupEntry>)> {
+    let (base, inverted) = match c {
+        'd' | 'D' => ('d', c.is_ascii_uppercase()),
+        'w' | 'W' => ('w', c.is_ascii_uppercase()),
+        's' | 'S' => ('s', c.is_ascii_uppercase()),
+        _ => return None,
+    };
+    let entries = if unicode {
+        // The Unicode tables are always present (regex-syntax default features); if a
+        // lookup somehow fails, fall through to the ASCII set rather than rejecting.
+        crate::unicode::perl_class(base).unwrap_or_else(|| ascii_shorthand(base))
+    } else {
+        ascii_shorthand(base)
+    };
+    Some((inverted, entries))
+}
+
+/// The ASCII codepoint set for a Perl shorthand base letter (`d`/`w`/`s`).
+fn ascii_shorthand(base: char) -> Vec<GroupEntry> {
+    match base {
+        'd' => vec![GroupEntry::Range('0', '9')],
+        'w' => vec![
             GroupEntry::Range('0', '9'),
             GroupEntry::Range('A', 'Z'),
             GroupEntry::Range('a', 'z'),
             GroupEntry::Char('_'),
-        ]
-    };
-    let space = || {
-        vec![
+        ],
+        // 's'
+        _ => vec![
             GroupEntry::Char(' '),
             GroupEntry::Char('\t'),
             GroupEntry::Char('\n'),
             GroupEntry::Char('\r'),
             GroupEntry::Char('\u{0c}'),
             GroupEntry::Char('\u{0b}'),
-        ]
-    };
-    match c {
-        'd' => Some((false, digit())),
-        'D' => Some((true, digit())),
-        'w' => Some((false, word())),
-        'W' => Some((true, word())),
-        's' => Some((false, space())),
-        'S' => Some((true, space())),
-        _ => None,
+        ],
     }
 }
 
@@ -329,13 +339,17 @@ fn parse_group(iter: &mut impl Iterator<Item = char>, flags: Flags) -> Option<At
                         first = false;
                         continue;
                     }
-                    if let Some((inverted, entries)) = shorthand_class(c) {
-                        // A negated shorthand can't be unioned into a positive class with
-                        // the flat group model, and a shorthand can't be a range bound.
-                        if inverted || in_range {
+                    if let Some((inverted, entries)) = shorthand_class(c, flags.unicode) {
+                        // A shorthand can't be a range bound; a negated shorthand
+                        // (`[\D]`, `[a\W]`) is unioned in as its materialised complement.
+                        if in_range {
                             return None;
                         }
-                        group_entries.extend(entries);
+                        if inverted {
+                            group_entries.extend(crate::unicode::negate(&entries));
+                        } else {
+                            group_entries.extend(entries);
+                        }
                         first = false;
                         continue;
                     }
@@ -676,7 +690,7 @@ fn parse_branches(iter: &mut std::str::Chars, in_group: bool, mut flags: Flags) 
                             repeat: Repeat::Once,
                             lazy: false,
                         });
-                    } else if let Some((inverted, entries)) = shorthand_class(c) {
+                    } else if let Some((inverted, entries)) = shorthand_class(c, flags.unicode) {
                         atoms.push(AtomRepeat {
                             atom: Atom::Group(inverted, entries),
                             repeat: Repeat::Once,
@@ -945,8 +959,25 @@ mod tests {
     #[test]
     fn shorthand_inside_class_is_merged() {
         assert_group(&atoms("[\\d_]")[0], false, &[GroupEntry::Range('0', '9'), GroupEntry::Char('_')]);
-        // A negated shorthand can't be represented inside a positive class.
-        assert!(SimpleRegexAst::parse("[\\D]").is_none());
+    }
+
+    #[test]
+    fn negated_shorthand_inside_class_is_materialised() {
+        // `[\D]` is a positive class of "everything but a digit": it parses now, with
+        // the complement materialised as ordinary ranges (a digit excluded, others in).
+        let in_class = |pattern: &str, c: char| match &atoms(pattern)[0].atom {
+            Atom::Group(false, entries) => entries.iter().any(|e| match e {
+                GroupEntry::Char(g) => *g == c,
+                GroupEntry::Range(lo, hi) => *lo <= c && c <= *hi,
+            }),
+            other => panic!("expected positive group, got {other:?}"),
+        };
+        assert!(!in_class(r"[\D]", '5'));
+        assert!(in_class(r"[\D]", 'a'));
+        // Unioned with other members: `[a\W]` excludes word chars except the listed `a`.
+        assert!(in_class(r"[a\W]", 'a'));
+        assert!(in_class(r"[a\W]", '!'));
+        assert!(!in_class(r"[a\W]", 'b'));
     }
 
     #[test]

@@ -17,6 +17,23 @@ fn entry_for(start: char, end: char) -> GroupEntry {
     if start == end { GroupEntry::Char(start) } else { GroupEntry::Range(start, end) }
 }
 
+/// Build a `regex-syntax` Unicode class from our [`GroupEntry`] list (overlapping /
+/// unsorted ranges are fine — `ClassUnicode::new` canonicalises them).
+fn class_from(entries: &[GroupEntry]) -> ClassUnicode {
+    ClassUnicode::new(entries.iter().map(|entry| {
+        let (lo, hi) = match entry {
+            GroupEntry::Char(c) => (*c, *c),
+            GroupEntry::Range(a, b) => (*a, *b),
+        };
+        ClassUnicodeRange::new(lo, hi)
+    }))
+}
+
+/// Render a `regex-syntax` Unicode class back as our [`GroupEntry`] list.
+fn entries_of(class: &ClassUnicode) -> Vec<GroupEntry> {
+    class.ranges().iter().map(|range| entry_for(range.start(), range.end())).collect()
+}
+
 /// Resolve a Unicode property class to a sorted, disjoint list of codepoint ranges
 /// as [`GroupEntry`]s. `body` is the text the user wrote between the braces of
 /// `\p{...}` (or the single letter of the shorthand `\pL`); `negated` selects the
@@ -55,17 +72,33 @@ pub fn property_entries(body: &str, negated: bool) -> Option<Vec<GroupEntry>> {
 /// unavailable (the `unicode-case` feature off), the entries are returned
 /// unchanged rather than panicking.
 pub fn case_fold(entries: &[GroupEntry]) -> Vec<GroupEntry> {
-    let mut class = ClassUnicode::new(entries.iter().map(|entry| {
-        let (lo, hi) = match entry {
-            GroupEntry::Char(c) => (*c, *c),
-            GroupEntry::Range(a, b) => (*a, *b),
-        };
-        ClassUnicodeRange::new(lo, hi)
-    }));
+    let mut class = class_from(entries);
     if class.try_case_fold_simple().is_err() {
         return entries.to_vec();
     }
-    class.ranges().iter().map(|range| entry_for(range.start(), range.end())).collect()
+    entries_of(&class)
+}
+
+/// The complement of a class over the whole scalar-value space, as a *positive*
+/// entry list. Lets a negated shorthand inside a class (`[\D]`, `[a\W]`) be unioned
+/// into the flat group model — the complement is materialised as ordinary ranges
+/// rather than needing the group to carry a negated subset.
+pub fn negate(entries: &[GroupEntry]) -> Vec<GroupEntry> {
+    let mut class = class_from(entries);
+    class.negate();
+    entries_of(&class)
+}
+
+/// Resolve a Perl shorthand class (`\d \w \s`) to its *positive* Unicode codepoint
+/// ranges via `regex-syntax`, used under Unicode mode in place of the ASCII sets.
+/// `escape` is the lowercase base letter; the caller handles the negated `\D \W \S`
+/// forms by inverting. Returns `None` only if the tables are unavailable.
+pub fn perl_class(escape: char) -> Option<Vec<GroupEntry>> {
+    let pattern = format!(r"\{escape}");
+    match regex_syntax::parse(&pattern).ok()?.into_kind() {
+        HirKind::Class(Class::Unicode(class)) => Some(entries_of(&class)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

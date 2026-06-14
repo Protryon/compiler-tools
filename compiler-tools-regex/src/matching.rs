@@ -529,6 +529,22 @@ mod tests {
     }
 
     #[test]
+    fn unicode_shorthands_match_non_ascii() {
+        // ASCII by default: a non-ASCII letter/digit is not a `\w`/`\d`.
+        assert_eq!(SimpleRegex::parse(r"\w").unwrap().find_prefix("é", None), None);
+        assert_eq!(SimpleRegex::parse(r"\d").unwrap().find_prefix("٧", None), None);
+        // Under `(?u)`, the shorthands use the full Unicode sets.
+        assert_eq!(SimpleRegex::parse(r"(?u)\w+").unwrap().find_prefix("café", None), Some(("café", "")));
+        // Arabic-Indic digit seven is `\d` under Unicode.
+        assert_eq!(SimpleRegex::parse(r"(?u)\d").unwrap().find_prefix("٧", None), Some(("٧", "")));
+        // `(?u)\s` matches a Unicode space (no-break space U+00A0).
+        assert_eq!(SimpleRegex::parse(r"(?u)\s").unwrap().find_prefix("\u{A0}", None), Some(("\u{A0}", "")));
+        // Negated `(?u)\D` excludes a Unicode digit.
+        assert_eq!(SimpleRegex::parse(r"(?u)\D").unwrap().find_prefix("٧", None), None);
+        assert_eq!(SimpleRegex::parse(r"(?u)\D").unwrap().find_prefix("x", None), Some(("x", "")));
+    }
+
+    #[test]
     fn dotall_flag_matches_newline() {
         let re = SimpleRegex::parse("(?s)a.b").unwrap();
         assert_eq!(re.find_prefix("a\nb", None), Some(("a\nb", "")));
