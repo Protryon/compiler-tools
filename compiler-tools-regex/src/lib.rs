@@ -1,8 +1,8 @@
 //! The compile-time "simple-regex" engine that backs `#[token(regex = "...")]`.
 //!
 //! It compiles a small regex dialect into a branch-only DFA and can both
-//! interpret it at runtime ([`SimpleRegex::find_prefix`]) and emit a self-contained
-//! Rust matcher from it ([`SimpleRegex::generate_parser`]). The proc-macro crate
+//! interpret it at runtime ([`Regex::find_prefix`]) and emit a self-contained
+//! Rust matcher from it ([`Regex::generate_parser`]). The proc-macro crate
 //! (`compiler-tools-derive`) consumes the latter; the conformance test crate
 //! exercises both against the upstream `regex` test corpus.
 
@@ -18,10 +18,12 @@ mod jit;
 mod matching;
 mod nfa;
 mod parse;
+mod search;
 mod unicode;
 
 #[cfg(feature = "jit")]
 pub use jit::{JitError, JitRegex};
+pub use search::{Match, Matches, RegexSearch, Split, SplitN};
 
 /// Collect an iterator of token-producing values into one [`TokenStream`].
 ///
@@ -154,16 +156,16 @@ pub struct SimpleRegexAst {
     pub atoms: Vec<AtomRepeat>,
 }
 
-pub struct SimpleRegex {
+pub struct Regex {
     pub ast: SimpleRegexAst,
     pub dfa: Dfa,
 }
 
-impl SimpleRegex {
-    pub fn parse(from: &str) -> Option<SimpleRegex> {
+impl Regex {
+    pub fn parse(from: &str) -> Option<Regex> {
         let parsed = SimpleRegexAst::parse(from)?;
         let nfa = Nfa::build(&parsed);
-        Some(SimpleRegex {
+        Some(Regex {
             ast: parsed,
             dfa: Dfa::build(&nfa),
         })

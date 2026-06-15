@@ -8,6 +8,41 @@ one at a time. For what the engine *does* support, see the engine section in
 Until a gap is closed, `#[token(regex_full = "...")]` routes to the real `regex`
 crate at runtime.
 
+## API parity
+
+Both runtime engines expose one anchored primitive — `find_prefix(from, prev) ->
+Option<(matched, remaining)>` on `Regex` (the DFA interpreter) and `JitRegex`
+(the Cranelift JIT). The `RegexSearch` trait (`src/search.rs`) layers the
+`regex`-crate-shaped *search orchestration* over that primitive as default methods,
+so both engines share one API. Bring the trait into scope to use it.
+
+Provided (leftmost-first, non-overlapping, matching the `regex` crate's defaults):
+
+| method | notes |
+|---|---|
+| `is_match` / `is_match_at` | unanchored search for any match |
+| `find` / `find_at` | leftmost match as a `Match` (`start`/`end`/`range`/`as_str`/`is_empty`/`len`) |
+| `find_iter` → `Matches` | all non-overlapping matches, with the empty-match-adjacency rule |
+| `replace` / `replace_all` / `replacen` | literal-string replacement, returning `Cow` |
+| `split` / `splitn` → `Split`/`SplitN` | substrings between matches |
+
+### API that needs engine work
+
+- **Capture groups** — `captures`/`captures_iter`, a `Captures` type, capture-group
+  spans (`m.get(1)`, named `["name"]`), and `$1`/`$name` expansion in the `replace*`
+  family. This engine never tracks capture-span positions: every `(...)`, `(?:...)`
+  and `(?P<n>...)` lowers to the same `Atom::Alternation` and the span identity is
+  discarded during NFA construction. Exposing captures means threading capture-slot
+  marks through the NFA/DFA (or running a Pike-VM-style submatch pass), so the
+  replacement helpers take a literal string for now rather than a `regex::Replacer`.
+  This is the single largest API gap and overlaps the multi-thread engine work the
+  conformance buckets call out below.
+- **`shortest_match` / `shortest_match_at`** — the engine is leftmost-first/greedy by
+  DFA priority; returning the *shortest* accepting prefix would need a separate
+  shortest-match DFA pass (or an earliest-match search mode), so it isn't offered.
+- **Overlapping / `match-kind = all` / `earliest` search** — search-orchestration
+  modes the leftmost-first `find_iter` doesn't model; see the conformance buckets.
+
 ## Gaps
 
 Unicode coverage is broad now and all built on the same idea — the engine is
@@ -55,9 +90,9 @@ where the corpus expects it.
 
 The `regex-conformance` crate runs the upstream `regex` test corpus (`testdata/`,
 parsed with the `regex-test` crate) against each form of the engine — the
-runtime DFA interpreter (`SimpleRegex::find_prefix`), the generated-Rust
+runtime DFA interpreter (`Regex::find_prefix`), the generated-Rust
 matcher (`generate_parser`, code-gen'd per-test in `regex-conformance/build.rs`),
-and — under `--features jit` — the Cranelift JIT (`SimpleRegex::compile_jit`),
+and — under `--features jit` — the Cranelift JIT (`Regex::compile_jit`),
 which the harness *asserts* matches the interpreter exactly (same DFA, so any
 divergence is a lowering bug). Each test is one of: **pass**, **fail-to-parse** (parser rejected the pattern),
 **fail-to-pass** (parsed but wrong matches), or **skipped** (regex set, or a

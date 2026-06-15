@@ -3,7 +3,7 @@
 //! (as opposed to the runtime DFA interpreter) without invoking the proc-macro.
 //!
 //! For each test with a single, parseable pattern we emit the same matcher
-//! `SimpleRegex::generate_parser` produces inside `#[token(regex = ...)]`, keyed
+//! `Regex::generate_parser` produces inside `#[token(regex = ...)]`, keyed
 //! by the test's full name. Patterns the engine can't parse (alternation, etc.)
 //! are simply absent from the table and skipped by the test.
 
@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use compiler_tools_regex::{SimpleRegex, flatten};
+use compiler_tools_regex::{Regex, flatten};
 use quote::{format_ident, quote};
 use regex_test::{RegexTest, RegexTests};
 
@@ -67,7 +67,7 @@ fn main() {
         if test.regexes().len() != 1 {
             continue;
         }
-        let Some(re) = SimpleRegex::parse(&effective_pattern(test)) else {
+        let Some(re) = Regex::parse(&effective_pattern(test)) else {
             continue;
         };
         let ident = format_ident!("compiled_{}", i);

@@ -7,7 +7,9 @@ use quote::{format_ident, quote, quote_spanned};
 use regex::Regex;
 use syn::{DeriveInput, Expr, ExprLit, ExprPath, Fields, FieldsUnnamed, Lifetime, Lit, Meta, Type, parse_macro_input, spanned::Spanned};
 
-use compiler_tools_regex::{SimpleRegex, flatten};
+// Aliased to disambiguate from the `regex` crate's `Regex` (imported above), which
+// this file also uses for the `regex_full` path.
+use compiler_tools_regex::{Regex as SimpleRegex, flatten};
 
 use crate::{codegen::class_match::gen_class_match, lit_table::LitTable};
 

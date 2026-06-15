@@ -1,6 +1,6 @@
 use super::*;
 
-impl SimpleRegex {
+impl Regex {
     /// Emit a self-contained `fn(&str, Option<char>) -> Option<(&str, &str)>` matcher
     /// for this DFA.
     ///
@@ -347,7 +347,7 @@ impl SimpleRegex {
     }
 
     /// Whether `state` is accepting: the transition-less sink, or any state carrying
-    /// an `End` edge. Mirrors `matching::SimpleRegex::accepts`.
+    /// an `End` edge. Mirrors `matching::Regex::accepts`.
     fn state_accepts(&self, state: u32) -> bool {
         state == self.dfa.final_state
             || self

@@ -54,7 +54,7 @@ use std::collections::HashMap;
 
 use crate::dfa::Dfa;
 use crate::nfa::TransitionEvent;
-use crate::{GroupEntry, SimpleRegex, WordBoundaryKind};
+use crate::{GroupEntry, Regex, WordBoundaryKind};
 
 /// Whether codepoint `cp` is a Unicode `\w` word char, as `0`/`1`. The JIT's
 /// `is_word_unicode`: the table is large, so rather than emit a binary search in IR we
@@ -97,7 +97,7 @@ impl std::fmt::Display for JitError {
 
 impl std::error::Error for JitError {}
 
-impl SimpleRegex {
+impl Regex {
     /// JIT-compile this regex's DFA into a native matcher. Heavy (it spins up a Cranelift
     /// module and emits + links code), so the result is meant to be built once and reused
     /// across many inputs.
@@ -107,7 +107,7 @@ impl SimpleRegex {
 }
 
 impl JitRegex {
-    fn build(regex: &SimpleRegex) -> Result<JitRegex, JitError> {
+    fn build(regex: &Regex) -> Result<JitRegex, JitError> {
         // Host-targeted JIT module. `JITBuilder::new` detects the running machine's ISA via
         // cranelift-native and applies the usual JIT-friendly ISA settings (default
         // `opt_level = "none"` — raising it measurably slows codegen here for no runtime gain
@@ -162,7 +162,7 @@ impl JitRegex {
         })
     }
 
-    /// Match a prefix of `from`, mirroring [`SimpleRegex::find_prefix`](crate::SimpleRegex):
+    /// Match a prefix of `from`, mirroring [`Regex::find_prefix`](crate::Regex):
     /// `prev` is the char immediately before `from` in the larger input (`None` at the
     /// start of text), seeding the zero-width assertions.
     pub fn find_prefix<'a>(&self, from: &'a str, prev: Option<char>) -> Option<(&'a str, &'a str)> {
@@ -215,7 +215,7 @@ fn emit_body(
     func: &mut cranelift_codegen::ir::Function,
     func_ctx: &mut FunctionBuilderContext,
     is_word_id: cranelift_module::FuncId,
-    regex: &SimpleRegex,
+    regex: &Regex,
 ) {
     // Reference the imported helper before the builder takes `func`.
     let iw_ref = module.declare_func_in_func(is_word_id, func);
@@ -811,19 +811,15 @@ mod tests {
     }
 
     fn agree_prev(pattern: &str, input: &str, prev: Option<char>) {
-        let re = SimpleRegex::parse(pattern).unwrap();
+        let re = Regex::parse(pattern).unwrap();
         let jit = re.compile_jit().expect("JIT build");
-        assert_eq!(
-            jit.find_prefix(input, prev),
-            re.find_prefix(input, prev),
-            "pattern {pattern:?} on input {input:?} (prev {prev:?})"
-        );
+        assert_eq!(jit.find_prefix(input, prev), re.find_prefix(input, prev), "pattern {pattern:?} on input {input:?} (prev {prev:?})");
     }
 
     #[test]
     fn jit_pipeline_links_and_runs() {
         // The whole toolchain: parse → DFA → Cranelift module → finalize → call.
-        let re = SimpleRegex::parse("abc").unwrap();
+        let re = Regex::parse("abc").unwrap();
         let jit = re.compile_jit().expect("JIT build");
         assert_eq!(jit.find_prefix("abc", None), Some(("abc", "")));
     }
@@ -908,7 +904,7 @@ mod tests {
     fn jit_timing() {
         use std::time::Instant;
         let input: String = std::iter::repeat_n("abcdefghijklmnopqrstuvwxyz", 4000).collect(); // 104 KB
-        let re = SimpleRegex::parse("[a-z]+").unwrap();
+        let re = Regex::parse("[a-z]+").unwrap();
         let jit = re.compile_jit().unwrap();
         // Sanity: both consume the whole run.
         assert_eq!(jit.find_prefix(&input, None), re.find_prefix(&input, None));

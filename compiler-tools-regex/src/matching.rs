@@ -31,7 +31,7 @@ fn atoms_could_capture_newline(atoms: &[AtomRepeat]) -> bool {
     })
 }
 
-impl SimpleRegex {
+impl Regex {
     pub fn could_capture_newline(&self) -> bool {
         atoms_could_capture_newline(&self.ast.atoms)
     }
@@ -285,7 +285,7 @@ mod tests {
     use super::*;
 
     fn newline_capture(pattern: &str) -> bool {
-        SimpleRegex::parse(pattern).expect("valid pattern").could_capture_newline()
+        Regex::parse(pattern).expect("valid pattern").could_capture_newline()
     }
 
     #[test]
@@ -316,12 +316,12 @@ mod tests {
 
     #[test]
     fn parse_rejects_unclosed_group() {
-        assert!(SimpleRegex::parse("[abc").is_none());
+        assert!(Regex::parse("[abc").is_none());
     }
 
     #[test]
     fn matches_digit_run() {
-        let re = SimpleRegex::parse("[0-9]+").unwrap();
+        let re = Regex::parse("[0-9]+").unwrap();
         assert!(re.matches("123"));
         assert!(!re.matches("abc"));
     }
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn matches_ident_prefix() {
         // Used at compile time to detect keyword/identifier conflicts.
-        let re = SimpleRegex::parse("[a-z][a-zA-Z0-9_]*").unwrap();
+        let re = Regex::parse("[a-z][a-zA-Z0-9_]*").unwrap();
         assert!(re.matches("let"));
         assert!(re.matches("foo_bar"));
         assert!(!re.matches("123"));
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn matches_exact_literal() {
-        let re = SimpleRegex::parse("let").unwrap();
+        let re = Regex::parse("let").unwrap();
         assert!(re.matches("let"));
         // `matches` reports a prefix match, as used for keyword/identifier
         // conflict detection.
@@ -349,14 +349,14 @@ mod tests {
 
     #[test]
     fn matches_escaped_metachar_literally() {
-        let re = SimpleRegex::parse("a\\*b").unwrap();
+        let re = Regex::parse("a\\*b").unwrap();
         assert!(re.matches("a*b"));
         assert!(!re.matches("aaab"));
     }
 
     #[test]
     fn matches_optional_atom() {
-        let re = SimpleRegex::parse("ab?c").unwrap();
+        let re = Regex::parse("ab?c").unwrap();
         assert!(re.matches("abc"));
         assert!(re.matches("ac"));
         // The trailing `c` is required, so an input that never reaches it fails.
@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn matches_dot_any_char_except_newline() {
-        let re = SimpleRegex::parse("a.c").unwrap();
+        let re = Regex::parse("a.c").unwrap();
         assert!(re.matches("abc"));
         assert!(re.matches("a_c"));
         // `.` does not match a newline.
@@ -375,28 +375,28 @@ mod tests {
 
     #[test]
     fn matches_shorthand_classes() {
-        let digits = SimpleRegex::parse("\\d+").unwrap();
+        let digits = Regex::parse("\\d+").unwrap();
         assert!(digits.matches("123"));
         assert!(!digits.matches("abc"));
 
-        let word = SimpleRegex::parse("\\w+").unwrap();
+        let word = Regex::parse("\\w+").unwrap();
         assert!(word.matches("foo_9"));
 
-        let non_digit = SimpleRegex::parse("\\D").unwrap();
+        let non_digit = Regex::parse("\\D").unwrap();
         assert!(non_digit.matches("a"));
         assert!(!non_digit.matches("5"));
     }
 
     #[test]
     fn matches_control_char_escape() {
-        let re = SimpleRegex::parse("a\\nb").unwrap();
+        let re = Regex::parse("a\\nb").unwrap();
         assert!(re.matches("a\nb"));
         assert!(!re.matches("anb"));
     }
 
     #[test]
     fn matches_counted_repetition() {
-        let re = SimpleRegex::parse("a{2,3}b").unwrap();
+        let re = Regex::parse("a{2,3}b").unwrap();
         // Fewer than the two mandatory copies never reaches the trailing `b`.
         assert!(!re.matches("ab"));
         assert!(re.matches("aab"));
@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn matches_exact_count() {
-        let re = SimpleRegex::parse("a{3}").unwrap();
+        let re = Regex::parse("a{3}").unwrap();
         assert!(re.matches("aaa"));
         // Only two copies never completes the third mandatory `a`.
         assert!(!re.matches("aa"));
@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn matches_inverted_class() {
-        let re = SimpleRegex::parse("[^0-9]+").unwrap();
+        let re = Regex::parse("[^0-9]+").unwrap();
         assert!(re.matches("abc"));
         assert!(!re.matches("123"));
     }
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn matches_leading_star_run() {
         // A char immediately followed by `*` (no prefix) still matches greedily.
-        let re = SimpleRegex::parse("a*b").unwrap();
+        let re = Regex::parse("a*b").unwrap();
         assert!(re.matches("aaab"));
         assert!(re.matches("b"));
         assert!(!re.matches("c"));
@@ -429,14 +429,14 @@ mod tests {
 
     #[test]
     fn matches_unicode_chars() {
-        let re = SimpleRegex::parse("[α-ω]+").unwrap();
+        let re = Regex::parse("[α-ω]+").unwrap();
         assert!(re.matches("λαμβδα"));
         assert!(!re.matches("abc"));
     }
 
     #[test]
     fn matches_top_level_alternation() {
-        let re = SimpleRegex::parse("abc|def").unwrap();
+        let re = Regex::parse("abc|def").unwrap();
         assert!(re.matches("abc"));
         assert!(re.matches("def"));
         assert!(!re.matches("abx"));
@@ -446,7 +446,7 @@ mod tests {
     #[test]
     fn matches_grouped_alternation() {
         // The group bounds the alternation: `foo` or `bar`, then a mandatory `!`.
-        let re = SimpleRegex::parse("(foo|bar)!").unwrap();
+        let re = Regex::parse("(foo|bar)!").unwrap();
         assert!(re.matches("foo!"));
         assert!(re.matches("bar!"));
         // Without the group, `|` would split into `(foo)` and `(bar!)`.
@@ -458,7 +458,7 @@ mod tests {
     #[test]
     fn matches_quantified_group() {
         // `(ab)+` — one or more repetitions of the whole group.
-        let re = SimpleRegex::parse("(ab)+").unwrap();
+        let re = Regex::parse("(ab)+").unwrap();
         assert!(re.matches("ab"));
         assert!(re.matches("abab"));
         assert!(re.matches("ababab"));
@@ -466,7 +466,7 @@ mod tests {
         assert!(!re.matches("ba"));
 
         // `(ab)*c` — zero or more, then a required `c`.
-        let re = SimpleRegex::parse("(ab)*c").unwrap();
+        let re = Regex::parse("(ab)*c").unwrap();
         assert!(re.matches("c"));
         assert!(re.matches("abc"));
         assert!(re.matches("ababc"));
@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn matches_optional_group() {
-        let re = SimpleRegex::parse("a(bc)?d").unwrap();
+        let re = Regex::parse("a(bc)?d").unwrap();
         assert!(re.matches("ad"));
         assert!(re.matches("abcd"));
         assert!(!re.matches("abd"));
@@ -484,7 +484,7 @@ mod tests {
     #[test]
     fn matches_nested_groups() {
         // `(a(b|c)d)+` — alternation nested inside a quantified group.
-        let re = SimpleRegex::parse("(a(b|c)d)+").unwrap();
+        let re = Regex::parse("(a(b|c)d)+").unwrap();
         assert!(re.matches("abd"));
         assert!(re.matches("acd"));
         assert!(re.matches("abdacd"));
@@ -498,7 +498,7 @@ mod tests {
     #[test]
     fn matches_empty_alternation_branch() {
         // `a(b|)c` — the second branch is empty, so `bc` is optional just like `ab?c`.
-        let re = SimpleRegex::parse("a(b|)c").unwrap();
+        let re = Regex::parse("a(b|)c").unwrap();
         assert!(re.matches("abc"));
         assert!(re.matches("ac"));
         assert!(!re.matches("axc"));
@@ -507,7 +507,7 @@ mod tests {
     #[test]
     fn non_capturing_and_named_groups_behave_like_groups() {
         for pattern in ["(?:foo|bar)!", "(?P<word>foo|bar)!", "(?<word>foo|bar)!"] {
-            let re = SimpleRegex::parse(pattern).unwrap_or_else(|| panic!("parse {pattern}"));
+            let re = Regex::parse(pattern).unwrap_or_else(|| panic!("parse {pattern}"));
             assert!(re.matches("foo!"), "{pattern} should match foo!");
             assert!(re.matches("bar!"), "{pattern} should match bar!");
             assert!(!re.matches("baz!"), "{pattern} should not match baz!");
@@ -518,10 +518,10 @@ mod tests {
     fn alternation_prefers_the_first_branch() {
         // This engine is leftmost-first, like the `regex` crate: the earlier branch
         // wins when both are viable, so `a|ab` takes `a` even though `ab` is longer.
-        let re = SimpleRegex::parse("a|ab").unwrap();
+        let re = Regex::parse("a|ab").unwrap();
         assert_eq!(re.find_prefix("ab", None), Some(("a", "b")));
         // Reordering the branches flips the result to the (now-first) longer branch.
-        assert_eq!(SimpleRegex::parse("ab|a").unwrap().find_prefix("ab", None), Some(("ab", "")));
+        assert_eq!(Regex::parse("ab|a").unwrap().find_prefix("ab", None), Some(("ab", "")));
         // When only the short branch can complete, that one wins regardless of order.
         assert_eq!(re.find_prefix("ac", None), Some(("a", "c")));
     }
@@ -530,32 +530,32 @@ mod tests {
     fn lazy_quantifiers_prefer_the_shorter_match() {
         // `.*?` stops at the first place the rest of the pattern can match, unlike
         // the greedy `.*` which runs to the last. Matches the `regex` crate.
-        let lazy = SimpleRegex::parse("a.*?b").unwrap();
+        let lazy = Regex::parse("a.*?b").unwrap();
         assert_eq!(lazy.find_prefix("axbxb", None), Some(("axb", "xb")));
-        let greedy = SimpleRegex::parse("a.*b").unwrap();
+        let greedy = Regex::parse("a.*b").unwrap();
         assert_eq!(greedy.find_prefix("axbxb", None), Some(("axbxb", "")));
 
         // `<.+?>` — the canonical "match one tag, not across tags" case.
-        let tag = SimpleRegex::parse("<.+?>").unwrap();
+        let tag = Regex::parse("<.+?>").unwrap();
         assert_eq!(tag.find_prefix("<a><b>", None), Some(("<a>", "<b>")));
 
         // Lazy `??` takes zero copies when the rest can still match.
-        let opt = SimpleRegex::parse("a??a").unwrap();
+        let opt = Regex::parse("a??a").unwrap();
         assert_eq!(opt.find_prefix("aa", None), Some(("a", "a")));
 
         // Lazy `+?` takes the minimum one copy.
-        let plus = SimpleRegex::parse("a+?").unwrap();
+        let plus = Regex::parse("a+?").unwrap();
         assert_eq!(plus.find_prefix("aaa", None), Some(("a", "aa")));
 
         // Lazy counted `{2,4}?` takes the two mandatory copies, no more.
-        let counted = SimpleRegex::parse("a{2,4}?").unwrap();
+        let counted = Regex::parse("a{2,4}?").unwrap();
         assert_eq!(counted.find_prefix("aaaa", None), Some(("aa", "aa")));
     }
 
     #[test]
     fn group_with_alternation_finds_longest_required_suffix() {
         // The trailing `z` forces the longer branch when the short one can't complete.
-        let re = SimpleRegex::parse("(a|ab)z").unwrap();
+        let re = Regex::parse("(a|ab)z").unwrap();
         assert_eq!(re.find_prefix("abz", None), Some(("abz", "")));
         assert_eq!(re.find_prefix("az", None), Some(("az", "")));
     }
@@ -563,17 +563,17 @@ mod tests {
     #[test]
     fn unsupported_or_malformed_group_syntax_is_rejected() {
         // Unclosed group, stray close, lookaround and unmodellable flags are rejected.
-        assert!(SimpleRegex::parse("(abc").is_none());
-        assert!(SimpleRegex::parse("abc)").is_none());
-        assert!(SimpleRegex::parse("(?=foo)").is_none());
-        assert!(SimpleRegex::parse("(?<=foo)bar").is_none());
+        assert!(Regex::parse("(abc").is_none());
+        assert!(Regex::parse("abc)").is_none());
+        assert!(Regex::parse("(?=foo)").is_none());
+        assert!(Regex::parse("(?<=foo)bar").is_none());
     }
 
     #[test]
     fn multiline_anchors_match_line_boundaries() {
         // `^` under `(?m)` holds at start of text or just after a `\n` (seeded by the
         // `prev` argument); `$` holds at end of text or just before a `\n`.
-        let re = SimpleRegex::parse("(?m)^[a-z]+$").unwrap();
+        let re = Regex::parse("(?m)^[a-z]+$").unwrap();
         // Anchored at the start of the slice: prev = None counts as a line start.
         assert_eq!(re.find_prefix("abc\ndef", None), Some(("abc", "\ndef")));
         // Mid-input slice whose preceding char is the `\n`: `^` still holds.
@@ -581,43 +581,43 @@ mod tests {
         // Same slice but preceded by a letter (mid-line): `^` must NOT hold.
         assert_eq!(re.find_prefix("def", Some('x')), None);
         // `$` fires before a `\n` even when more input follows.
-        assert_eq!(SimpleRegex::parse("(?m)[a-z]+$").unwrap().find_prefix("abc\nxyz", None), Some(("abc", "\nxyz")));
+        assert_eq!(Regex::parse("(?m)[a-z]+$").unwrap().find_prefix("abc\nxyz", None), Some(("abc", "\nxyz")));
     }
 
     #[test]
     fn start_of_text_anchor_only_holds_at_input_start() {
         // `^`/`\A` (non-multiline) is a real start-of-text assertion: it holds only
         // when there is no preceding char, so a mid-haystack slice (prev = Some) fails.
-        let re = SimpleRegex::parse("^abc").unwrap();
+        let re = Regex::parse("^abc").unwrap();
         assert_eq!(re.find_prefix("abc", None), Some(("abc", "")));
         assert_eq!(re.find_prefix("abc", Some('x')), None);
         // `\A` is the same assertion and is valid anywhere (mid-pattern it can't hold).
-        assert_eq!(SimpleRegex::parse("\\Aabc").unwrap().find_prefix("abc", None), Some(("abc", "")));
-        assert_eq!(SimpleRegex::parse("a\\Ab").unwrap().find_prefix("ab", None), None);
+        assert_eq!(Regex::parse("\\Aabc").unwrap().find_prefix("abc", None), Some(("abc", "")));
+        assert_eq!(Regex::parse("a\\Ab").unwrap().find_prefix("ab", None), None);
     }
 
     #[test]
     fn non_trailing_dollar_is_end_of_text() {
         // A `$`/`\z` anywhere is an end-of-text assertion (not a literal): `$\b` only
         // matches the empty string at the very end.
-        let re = SimpleRegex::parse("$\\b").unwrap();
+        let re = Regex::parse("$\\b").unwrap();
         assert_eq!(re.find_prefix("", Some('b')), Some(("", "")));
         assert_eq!(re.find_prefix("ab", None), None);
         // `a$b` can never match (end of text then more input).
-        assert_eq!(SimpleRegex::parse("a$b").unwrap().find_prefix("ab", None), None);
+        assert_eq!(Regex::parse("a$b").unwrap().find_prefix("ab", None), None);
     }
 
     #[test]
     fn word_boundary_backs_off_past_a_greedy_match() {
         // `\b.+\b`: the greedy `.+` consumes past the inner `\b`, but the matcher
         // records the `\b`-gated accept and backs off to it (regex-crate semantics).
-        let re = SimpleRegex::parse("\\b.+\\b").unwrap();
+        let re = Regex::parse("\\b.+\\b").unwrap();
         // Greedy `.+` runs to the end ("abc$$"), but the end (`$`→input edge, both
         // non-word) is not a `\b`, so it backs off to the last boundary (after `c`).
         assert_eq!(re.find_prefix("abc$$", Some('$')), Some(("abc", "$$")));
         // `(?:fo|foo)\B`: `foo` fails its trailing `\B` at end of input, so the match
         // backs off to `fo`, whose `\B` holds between the two `o`s.
-        let re = SimpleRegex::parse("(?:fo|foo)\\B").unwrap();
+        let re = Regex::parse("(?:fo|foo)\\B").unwrap();
         assert_eq!(re.find_prefix("foo", Some('x')), Some(("fo", "o")));
     }
 
@@ -625,26 +625,26 @@ mod tests {
     fn directional_half_boundaries_constrain_one_side() {
         // `\b{start}`: non-word (or edge) on the left, word char on the right — so it
         // gates the start of a word but not its end.
-        let start = SimpleRegex::parse("\\b{start}[a-z]+").unwrap();
+        let start = Regex::parse("\\b{start}[a-z]+").unwrap();
         assert_eq!(start.find_prefix("foo", None), Some(("foo", "")));
         // Preceding word char ⇒ not a start-of-word, so the assertion fails.
         assert_eq!(start.find_prefix("foo", Some('x')), None);
 
         // `\b{end}`: word char on the left, non-word (or edge) on the right.
-        let end = SimpleRegex::parse("[a-z]+\\b{end}").unwrap();
+        let end = Regex::parse("[a-z]+\\b{end}").unwrap();
         // Greedy run reaches the word/non-word edge before the space and backs off there.
         assert_eq!(end.find_prefix("foo bar", None), Some(("foo", " bar")));
 
         // `\b{start-half}`: only the left side must be non-word — a zero-width match
         // holds at start of text and before a word char, but NOT after a word char.
-        let half = SimpleRegex::parse("\\b{start-half}").unwrap();
+        let half = Regex::parse("\\b{start-half}").unwrap();
         assert_eq!(half.find_prefix("x", None), Some(("", "x")));
         assert_eq!(half.find_prefix("x", Some(' ')), Some(("", "x")));
         assert_eq!(half.find_prefix("x", Some('w')), None);
 
         // `\b{end-half}`: only the right side must be non-word — holds at end of text
         // and before a non-word char, but not before a word char.
-        let endhalf = SimpleRegex::parse("\\b{end-half}").unwrap();
+        let endhalf = Regex::parse("\\b{end-half}").unwrap();
         assert_eq!(endhalf.find_prefix("", Some('w')), Some(("", "")));
         assert_eq!(endhalf.find_prefix(" x", Some('w')), Some(("", " x")));
         assert_eq!(endhalf.find_prefix("x", Some(' ')), None);
@@ -653,7 +653,7 @@ mod tests {
     #[test]
     fn crlf_multiline_anchors_treat_crlf_as_one_terminator() {
         // `(?Rm)`: `\r`, `\n` and the atomic `\r\n` are all line terminators.
-        let end = SimpleRegex::parse("(?Rm)[a-z]+$").unwrap();
+        let end = Regex::parse("(?Rm)[a-z]+$").unwrap();
         // `$` fires before the `\r` of a `\r\n` pair (not between the `\r` and `\n`).
         assert_eq!(end.find_prefix("abc\r\nxyz", None), Some(("abc", "\r\nxyz")));
         // `$` fires before a lone `\n` as well.
@@ -663,32 +663,32 @@ mod tests {
 
         // `^` holds after the `\n` of a `\r\n` pair (prev seeded by the caller), but
         // not between the `\r` and `\n`.
-        let start = SimpleRegex::parse("(?Rm)^[a-z]+").unwrap();
+        let start = Regex::parse("(?Rm)^[a-z]+").unwrap();
         assert_eq!(start.find_prefix("xyz", Some('\n')), Some(("xyz", "")));
         assert_eq!(start.find_prefix("xyz", Some('\r')), Some(("xyz", "")));
         // Slice starting at the `\n` of a `\r\n` pair: `^` must NOT hold there.
-        assert_eq!(SimpleRegex::parse("(?Rm)^").unwrap().find_prefix("\nx", Some('\r')), None);
+        assert_eq!(Regex::parse("(?Rm)^").unwrap().find_prefix("\nx", Some('\r')), None);
     }
 
     #[test]
     fn crlf_dot_excludes_carriage_return() {
         // Under `(?R)`, `.` excludes `\r` as well as `\n`.
-        let re = SimpleRegex::parse("(?R)a.").unwrap();
+        let re = Regex::parse("(?R)a.").unwrap();
         assert_eq!(re.find_prefix("a\rb", None), None);
         assert_eq!(re.find_prefix("a\nb", None), None);
         assert_eq!(re.find_prefix("axb", None), Some(("ax", "b")));
         // Without `(?R)`, `.` still matches a `\r`.
-        assert_eq!(SimpleRegex::parse("a.").unwrap().find_prefix("a\rb", None), Some(("a\r", "b")));
+        assert_eq!(Regex::parse("a.").unwrap().find_prefix("a\rb", None), Some(("a\r", "b")));
     }
 
     #[test]
     fn case_insensitive_flag_matches_either_case() {
-        let re = SimpleRegex::parse("(?i)foo").unwrap();
+        let re = Regex::parse("(?i)foo").unwrap();
         assert_eq!(re.find_prefix("FoObar", None), Some(("FoO", "bar")));
         assert_eq!(re.find_prefix("FOO", None), Some(("FOO", "")));
         assert_eq!(re.find_prefix("bar", None), None);
         // Scoped form only folds the group body.
-        let scoped = SimpleRegex::parse("a(?i:b)c").unwrap();
+        let scoped = Regex::parse("a(?i:b)c").unwrap();
         assert_eq!(scoped.find_prefix("aBc", None), Some(("aBc", "")));
         assert_eq!(scoped.find_prefix("Abc", None), None);
     }
@@ -696,64 +696,64 @@ mod tests {
     #[test]
     fn unicode_case_folding_under_iu() {
         // Plain `(?i)` is ASCII-only: a non-ASCII letter is not folded.
-        let ascii = SimpleRegex::parse("(?i)Σ").unwrap();
+        let ascii = Regex::parse("(?i)Σ").unwrap();
         assert_eq!(ascii.find_prefix("σ", None), None);
         // `(?iu)` folds with the full Unicode tables: Σ matches σ and final-sigma ς.
-        let uni = SimpleRegex::parse("(?iu)Σ").unwrap();
+        let uni = Regex::parse("(?iu)Σ").unwrap();
         assert_eq!(uni.find_prefix("σ", None), Some(("σ", "")));
         assert_eq!(uni.find_prefix("ς", None), Some(("ς", "")));
         // The Kelvin sign (U+212A) simple-folds to `k`, which ASCII folding misses.
-        let kelvin = SimpleRegex::parse("(?iu)k").unwrap();
+        let kelvin = Regex::parse("(?iu)k").unwrap();
         assert_eq!(kelvin.find_prefix("\u{212A}", None), Some(("\u{212A}", "")));
-        assert_eq!(SimpleRegex::parse("(?i)k").unwrap().find_prefix("\u{212A}", None), None);
+        assert_eq!(Regex::parse("(?i)k").unwrap().find_prefix("\u{212A}", None), None);
         // A class folds with Unicode equivalents too.
-        let class = SimpleRegex::parse("(?iu)[α-ω]").unwrap();
+        let class = Regex::parse("(?iu)[α-ω]").unwrap();
         assert_eq!(class.find_prefix("Λ", None), Some(("Λ", "")));
     }
 
     #[test]
     fn unicode_shorthands_match_non_ascii() {
         // ASCII by default: a non-ASCII letter/digit is not a `\w`/`\d`.
-        assert_eq!(SimpleRegex::parse(r"\w").unwrap().find_prefix("é", None), None);
-        assert_eq!(SimpleRegex::parse(r"\d").unwrap().find_prefix("٧", None), None);
+        assert_eq!(Regex::parse(r"\w").unwrap().find_prefix("é", None), None);
+        assert_eq!(Regex::parse(r"\d").unwrap().find_prefix("٧", None), None);
         // Under `(?u)`, the shorthands use the full Unicode sets.
-        assert_eq!(SimpleRegex::parse(r"(?u)\w+").unwrap().find_prefix("café", None), Some(("café", "")));
+        assert_eq!(Regex::parse(r"(?u)\w+").unwrap().find_prefix("café", None), Some(("café", "")));
         // Arabic-Indic digit seven is `\d` under Unicode.
-        assert_eq!(SimpleRegex::parse(r"(?u)\d").unwrap().find_prefix("٧", None), Some(("٧", "")));
+        assert_eq!(Regex::parse(r"(?u)\d").unwrap().find_prefix("٧", None), Some(("٧", "")));
         // `(?u)\s` matches a Unicode space (no-break space U+00A0).
-        assert_eq!(SimpleRegex::parse(r"(?u)\s").unwrap().find_prefix("\u{A0}", None), Some(("\u{A0}", "")));
+        assert_eq!(Regex::parse(r"(?u)\s").unwrap().find_prefix("\u{A0}", None), Some(("\u{A0}", "")));
         // Negated `(?u)\D` excludes a Unicode digit.
-        assert_eq!(SimpleRegex::parse(r"(?u)\D").unwrap().find_prefix("٧", None), None);
-        assert_eq!(SimpleRegex::parse(r"(?u)\D").unwrap().find_prefix("x", None), Some(("x", "")));
+        assert_eq!(Regex::parse(r"(?u)\D").unwrap().find_prefix("٧", None), None);
+        assert_eq!(Regex::parse(r"(?u)\D").unwrap().find_prefix("x", None), Some(("x", "")));
     }
 
     #[test]
     fn unicode_word_boundary_uses_unicode_word_ness() {
         // ASCII `\b`: a non-ASCII letter is a non-word char, so `\bx` matches with a
         // preceding `é` (an ASCII-word↔non-word transition sits between them).
-        let ascii = SimpleRegex::parse(r"\bfoo").unwrap();
+        let ascii = Regex::parse(r"\bfoo").unwrap();
         assert_eq!(ascii.find_prefix("foo", Some('é')), Some(("foo", "")));
         // Unicode `\b`: `é` is a word char, so there is no boundary before `foo`.
-        let uni = SimpleRegex::parse(r"(?u)\bfoo").unwrap();
+        let uni = Regex::parse(r"(?u)\bfoo").unwrap();
         assert_eq!(uni.find_prefix("foo", Some('é')), None);
         // ...but there is a Unicode boundary after a non-word char.
         assert_eq!(uni.find_prefix("foo", Some(' ')), Some(("foo", "")));
         // `\B` is the complement: a Unicode `\B` holds between two word chars.
-        let nb = SimpleRegex::parse(r"(?u)\Bfoo").unwrap();
+        let nb = Regex::parse(r"(?u)\Bfoo").unwrap();
         assert_eq!(nb.find_prefix("foo", Some('é')), Some(("foo", "")));
     }
 
     #[test]
     fn dotall_flag_matches_newline() {
-        let re = SimpleRegex::parse("(?s)a.b").unwrap();
+        let re = Regex::parse("(?s)a.b").unwrap();
         assert_eq!(re.find_prefix("a\nb", None), Some(("a\nb", "")));
         // Without the flag, `.` will not cross a newline.
-        assert_eq!(SimpleRegex::parse("a.b").unwrap().find_prefix("a\nb", None), None);
+        assert_eq!(Regex::parse("a.b").unwrap().find_prefix("a\nb", None), None);
     }
 
     #[test]
     fn escaped_parens_and_pipe_stay_literal() {
-        let re = SimpleRegex::parse("\\(a\\|b\\)").unwrap();
+        let re = Regex::parse("\\(a\\|b\\)").unwrap();
         assert!(re.matches("(a|b)"));
         assert!(!re.matches("a"));
     }

@@ -11,9 +11,9 @@
 //!    benchmark the *identical* workload.
 //! 2. **Benchmark** (timed): run that passing set, as a whole, through these
 //!    engines so cargo-criterion can compare them:
-//!      * `simple-runtime`  — `SimpleRegex::find_prefix` (DFA interpreter),
+//!      * `simple-runtime`  — `Regex::find_prefix` (DFA interpreter),
 //!      * `simple-compiled` — the generated-Rust matchers (`compiled_lookup`),
-//!      * `simple-jit`      — the Cranelift JIT (`SimpleRegex::compile_jit`), only
+//!      * `simple-jit`      — the Cranelift JIT (`Regex::compile_jit`), only
 //!        under `--features jit`,
 //!      * `regex-crate`     — the upstream `regex` crate, for comparison.
 //!
@@ -25,7 +25,7 @@
 //! add `--features jit` to include the `simple-jit` engine.
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use regex_conformance::{SimpleRegex, compiled_lookup, load_corpus, passes, run_search};
+use regex_conformance::{Regex, compiled_lookup, load_corpus, passes, run_search};
 use regex_test::{RegexTest, RegexTests};
 use std::hint::black_box;
 
@@ -33,7 +33,7 @@ use std::hint::black_box;
 /// compilation done once, up front (outside the timed loop).
 struct Case<'a> {
     test: &'a RegexTest,
-    simple: SimpleRegex,
+    simple: Regex,
     compiled: fn(&str, Option<char>) -> Option<(&str, &str)>,
     full: regex::Regex,
     #[cfg(feature = "jit")]
@@ -52,7 +52,7 @@ fn select(corpus: &RegexTests) -> Vec<Case<'_>> {
             if std::str::from_utf8(test.haystack()).is_err() {
                 return None;
             }
-            let simple = SimpleRegex::parse(pattern)?;
+            let simple = Regex::parse(pattern)?;
             // JIT-compile once here (heavy), before `simple` is moved into `Case`; the
             // resulting `JitRegex` owns its code, so it outlives the borrow.
             #[cfg(feature = "jit")]
@@ -62,9 +62,9 @@ fn select(corpus: &RegexTests) -> Vec<Case<'_>> {
             let full = regex::Regex::new(&format!(r"\A(?:{pattern})")).ok()?;
 
             // Only keep tests the simple engine genuinely passes. `passes` parses a
-            // fresh `SimpleRegex` for the check since the one we store is borrowed by
-            // `find_prefix` and `SimpleRegex` isn't `Clone`.
-            let check = SimpleRegex::parse(pattern)?;
+            // fresh `Regex` for the check since the one we store is borrowed by
+            // `find_prefix` and `Regex` isn't `Clone`.
+            let check = Regex::parse(pattern)?;
             if !passes(test, Box::new(move |input, prev| check.find_prefix(input, prev))) {
                 return None;
             }

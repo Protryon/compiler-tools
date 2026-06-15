@@ -2,10 +2,10 @@
 //! parsed with the `regex-test` crate) against compiler-tools' simple-regex
 //! engine, in both of its forms:
 //!
-//! * the **runtime interpreter** — [`compiler_tools_regex::SimpleRegex::find_prefix`],
+//! * the **runtime interpreter** — [`compiler_tools_regex::Regex::find_prefix`],
 //!   which walks the compiled DFA directly, and
 //! * the **compiled-Rust engine** — the `fn(&str) -> Option<(&str, &str)>` matchers
-//!   that `build.rs` emits via `SimpleRegex::generate_parser` (the exact code
+//!   that `build.rs` emits via `Regex::generate_parser` (the exact code
 //!   `#[token(regex = ...)]` expands to), looked up here via [`compiled_lookup`].
 //!
 //! Both engines are anchored prefix matchers, so [`run_search`] turns one into a
@@ -17,7 +17,7 @@
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
-pub use compiler_tools_regex::SimpleRegex;
+pub use compiler_tools_regex::Regex;
 use regex_test::{CompiledRegex, Match, RegexTest, RegexTests, Span, TestResult, TestRunner, anyhow};
 
 // `compiled_lookup` plus one `compiled_<n>` matcher per supported test. The

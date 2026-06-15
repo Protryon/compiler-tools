@@ -50,7 +50,7 @@ A fast-path guard (`matching.rs`, `accepts_via_assertions`) already returns earl
 states with no zero-width edge, but it still re-scans the state's transitions for a
 zero-width edge every iteration, and the slow path allocates a `HashSet`/`Vec` per call.
 
-Scope: this is the **runtime DFA interpreter only** (`SimpleRegex::find_prefix`), which
+Scope: this is the **runtime DFA interpreter only** (`Regex::find_prefix`), which
 is exercised by the `regex-conformance` harness — **not** the compiled-Rust matcher
 that `#[token(regex = ...)]` actually emits (`generate.rs`), whose accept conditions are
 precomputed at build time and which stayed at ~2.2 µs/search. So the regression has no

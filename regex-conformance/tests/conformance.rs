@@ -18,7 +18,7 @@
 
 use std::time::{Duration, Instant};
 
-use regex_conformance::{BoxedMatcher, SimpleRegex, compiled_lookup, effective_pattern, load_corpus, passes, run_search};
+use regex_conformance::{BoxedMatcher, Regex, compiled_lookup, effective_pattern, load_corpus, passes, run_search};
 use regex_test::{RegexTest, RegexTests};
 
 /// What an engine could do with a given test before we try to run it.
@@ -126,12 +126,12 @@ fn summarize(label: &str, tests: &RegexTests, prepare: impl Fn(&RegexTest) -> Pr
 fn conformance_summary() {
     let tests = load_corpus();
 
-    // Runtime interpreter: `SimpleRegex::find_prefix` walks the DFA directly.
+    // Runtime interpreter: `Regex::find_prefix` walks the DFA directly.
     let runtime = summarize("runtime interpreter", &tests, |test| {
         let [_] = test.regexes() else {
             return Prepared::Skip; // regex sets are out of scope for this engine
         };
-        match SimpleRegex::parse(&effective_pattern(test)) {
+        match Regex::parse(&effective_pattern(test)) {
             Some(regex) => Prepared::Run(Box::new(move |input, prev| regex.find_prefix(input, prev))),
             None => Prepared::FailToParse,
         }
@@ -143,7 +143,7 @@ fn conformance_summary() {
             return Prepared::Skip;
         };
         // Use the parser to tell "couldn't parse" apart from "parsed but no matcher".
-        if SimpleRegex::parse(&effective_pattern(test)).is_none() {
+        if Regex::parse(&effective_pattern(test)).is_none() {
             return Prepared::FailToParse;
         }
         match compiled_lookup(test.full_name()) {
@@ -159,7 +159,7 @@ fn conformance_summary() {
         let [_] = test.regexes() else {
             return Prepared::Skip;
         };
-        match SimpleRegex::parse(&effective_pattern(test)) {
+        match Regex::parse(&effective_pattern(test)) {
             // A JIT build failure (e.g. a non-64-bit host) counts as fail-to-parse, the same
             // bucket the compiled engine uses when it has no matcher for a parsed pattern.
             Some(regex) => match regex.compile_jit() {
