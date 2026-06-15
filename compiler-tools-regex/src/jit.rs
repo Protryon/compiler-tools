@@ -46,7 +46,7 @@
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{AbiParam, Block, FuncRef, InstBuilder, MemFlags, Value, types};
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
 
@@ -108,10 +108,11 @@ impl SimpleRegex {
 
 impl JitRegex {
     fn build(regex: &SimpleRegex) -> Result<JitRegex, JitError> {
-        // Host-targeted JIT module. `JITBuilder::new` detects the running machine's ISA
-        // via cranelift-native and applies the usual JIT-friendly ISA settings. Register
-        // the imported helper's address *before* the module is created so the import
-        // resolves at finalize time.
+        // Host-targeted JIT module. `JITBuilder::new` detects the running machine's ISA via
+        // cranelift-native and applies the usual JIT-friendly ISA settings (default
+        // `opt_level = "none"` — raising it measurably slows codegen here for no runtime gain
+        // on token-sized matchers). Register the imported helper's address *before* the module
+        // is created so the import resolves at finalize time.
         let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).map_err(err)?;
         builder.symbol("jit_is_word_unicode", jit_is_word_unicode as *const u8);
         let mut module = JITModule::new(builder);
@@ -361,15 +362,43 @@ impl Lower<'_> {
         for &(.., t) in &leaves {
             target_adv.entry(t).or_insert_with(|| bcx.create_block());
         }
-        let resolved: Vec<(u32, u32, Block)> = leaves.iter().map(|&(lo, hi, t)| (lo, hi, target_adv[&t])).collect();
 
         // At end of input there is no char to consume, so skip straight to the fallback.
         let has_char = bcx.ins().icmp_imm(IntCC::NotEqual, cw, 0);
         let dispatch = bcx.create_block();
         bcx.ins().brif(has_char, dispatch, &[], zw_block, &[]);
-
         bcx.switch_to_block(dispatch);
-        emit_range_search(bcx, cp, &resolved, zw_block);
+
+        // Split the disjoint ranges into singletons (exact codepoints) and wider ranges. A
+        // dense singleton set — keyword/literal-alternation dispatch — lowers to a Cranelift
+        // `Switch` (a jump table or tuned bsearch); wider ranges stay a binary search. The two
+        // buckets are disjoint, so a `Switch` miss falls through to the range search.
+        const SWITCH_MIN: usize = 4;
+        let singletons: Vec<(u32, u32)> = leaves.iter().filter(|&&(lo, hi, _)| lo == hi).map(|&(lo, _, t)| (lo, t)).collect();
+        let ranges: Vec<(u32, u32, Block)> = leaves
+            .iter()
+            .filter(|&&(lo, hi, _)| lo != hi)
+            .map(|&(lo, hi, t)| (lo, hi, target_adv[&t]))
+            .collect();
+
+        if singletons.len() >= SWITCH_MIN {
+            let mut switch = Switch::new();
+            for &(cp_key, t) in &singletons {
+                switch.set_entry(u128::from(cp_key), target_adv[&t]);
+            }
+            // Miss on the jump table → either the range search or the fallback directly.
+            let otherwise = if ranges.is_empty() { zw_block } else { bcx.create_block() };
+            switch.emit(bcx, cp, otherwise);
+            if !ranges.is_empty() {
+                bcx.switch_to_block(otherwise);
+                emit_range_search(bcx, cp, &ranges, zw_block);
+            }
+        } else {
+            // Few/no singletons: fold everything into one binary search (singletons are lo==hi
+            // leaves), avoiding the `Switch` machinery for the common 1–2 edge case.
+            let resolved: Vec<(u32, u32, Block)> = leaves.iter().map(|&(lo, hi, t)| (lo, hi, target_adv[&t])).collect();
+            emit_range_search(bcx, cp, &resolved, zw_block);
+        }
 
         // Each target's advance block: consume the char and jump to the target state.
         for (target, block) in target_adv {
@@ -853,6 +882,22 @@ mod tests {
         // unicode word boundary
         agree_prev("(?u)\\bfoo", "foo", Some('é'));
         agree_prev("(?u)\\bfoo", "foo", Some(' '));
+    }
+
+    #[test]
+    fn switch_dispatch() {
+        // Literal alternations whose start state has many single-char edges (>= SWITCH_MIN),
+        // exercising the `Switch` jump-table path; plus a singleton-and-range mix so a Switch
+        // miss falls through to the range search.
+        let kw = "apple|banana|cherry|date|fig|grape|kiwi";
+        for input in ["apple", "fig", "grapefruit", "kiwi!", "lemon", "", "z"] {
+            agree(kw, input);
+        }
+        // A keyword vs identifier shape: 't' diverges, the rest of [a-z]+ is the range bucket.
+        let mixed = "to|for|if|do|while|[a-z]+";
+        for input in ["to", "for", "ifx", "while", "zebra", "do"] {
+            agree(mixed, input);
+        }
     }
 
     // A rough per-match timing comparison on a long input, where the inline UTF-8 decode (vs
